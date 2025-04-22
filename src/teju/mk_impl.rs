@@ -1,0 +1,1210 @@
+use crate::teju::common;
+use common::{Exp, Result, /*Signed*/};
+
+/// The mantissa is represented by an unsigned integer the same size as the float (in this case,
+/// u64 for f64).
+pub type Mant = u64;
+
+/// The **absolute value** of an `f64` decoded into exponent and mantissa.
+#[derive(Debug)]
+#[derive(Clone, Copy)]
+#[derive(PartialEq, Eq)]
+pub struct Binary {
+    exp: Exp,  // TODO enforce bounds on exp 
+    mant: Mant,
+}
+
+/// A decimal representation of the absolute value of an `f64`.
+#[derive(Debug)]
+#[derive(Clone, Copy)]
+#[derive(PartialEq, Eq)]
+pub struct Decimal {
+    exp: Exp,
+    mant: Mant,  // TODO make signed?
+}
+
+// TODO strong typing to keep track of decimal/binary exponent/mantissa?
+
+// type Multipliers = common::Multipliers<Mant>;
+type Multiplier = common::Multiplier<Mant>;
+
+/// Calculates the result of `a * mult / 2^(2N)` without overflow, `N` is the number of bits of
+/// `a`, `mult.hi`, `mult.lo`.
+const fn multiword_multiply_shift(a: Mant, mult: &Multiplier) -> Mant {
+    const N: u32 = 64;
+    let result_hi = mult.hi as u128 * a as u128;
+    let result_lo = mult.lo as u128 * a as u128;
+    let result = (result_hi + (result_lo >> N)) >> N;
+    result as Mant
+}
+
+/// Calculates the result of `multiword_multiply_shift(2^k, mult)` without overflow,
+const fn multiword_multiply_shift_pow2(k: u32, mult: &Multiplier) -> Mant {
+    const N: u32 = 64;
+    let s: Exp = k as Exp - (2 * N - N) as Exp;
+    if s <= 0 {
+        mult.hi >> (-s as u32)
+    } else {
+        (mult.hi << s as u32) | mult.lo  >> (-(k as Exp) as u32)
+    }
+}
+
+
+/// Returns the lowest `n` bits of `x`.
+pub const fn lsb(x: Mant, n: u32) -> Mant {
+    x % (1 << n)
+}
+
+/// Checks if `n` is an even number, in which case a mantissa of `n` wins the tiebreak against its
+/// neighbours (in a "round to nearest, ties to even" rounding rule).
+#[inline]
+pub const fn is_even(n: Mant) -> bool {
+    n % 2 == 0
+}
+
+impl Binary {
+    const BITS_MANTISSA: u32 = 53;
+
+    const MIN_EXP: Exp = f64::MIN_EXP - Self::BITS_MANTISSA as i32;
+
+    /// Decomposes a **finite** `f64` into the binary exponent and mantissa of its absolute
+    /// value, i.e. such that `|num| = mant * 2^exp`.
+    ///
+    /// If `num` is infinite or NaN, returns `None`.
+    #[inline]
+    pub const fn new(num: f64) -> Option<Self> {
+        if !num.is_finite() { return None }
+        Some(Self::new_finite(num))
+    }
+
+    /// As [Self::new], but does not check that `f64` is finite. If it is (`±∞`, or `NaN`), then
+    /// the return value is unspecified.
+    #[inline]
+    pub const fn new_finite(num: f64) -> Self {
+        let num = num.abs();
+        let mut mant = lsb(num.to_bits(), Self::BITS_MANTISSA - 1);
+        let mut exp = (num.to_bits() >> (Self::BITS_MANTISSA - 1)) as Exp;
+
+        if exp != 0 {
+            exp -= 1;
+            mant |= 1 << (Self::BITS_MANTISSA - 1);
+        }
+
+        Binary{
+            exp: exp + Self::MIN_EXP,
+            mant,
+        }
+    }
+
+    /// Returns the largest exponent `f` such that `10^f ≤ 2^e`, i.e. the integer part of
+    /// `log_10(2^e)`.
+    #[inline]
+    const fn exp_log10_pow2(&self) -> Exp {
+        common::exp_log10_pow2(self.exp)
+    }
+
+    /// Returns the largest exponent `f` such that `10^f ≤ 2^e`, i.e. the integer part of
+    /// `log_10(2^e)`.
+    #[inline]
+    const fn exp_log10_pow2_residual(&self) -> u32 {
+        common::exp_log10_pow2_residual(self.exp)
+    }
+
+    /// Checks whether `self.mant
+    #[inline]
+    const fn is_multiple_of_pow2(&self) -> bool {
+        (self.mant >> self.exp) << self.exp == self.mant
+    }
+
+    #[inline]
+    const fn is_small_integer(&self) -> bool {
+        // `self.exp` has to be in the interval [0; BITS_MANTISSA[, and `self` must be a clean
+        // multiple of a power of 2 (with no information loss).
+        let neg_exp = -self.exp;
+        0 <= neg_exp && neg_exp < Self::BITS_MANTISSA as Exp
+            && Binary{exp: neg_exp, .. *self}.is_multiple_of_pow2()
+    }
+
+    /// The core of Tejú Jaguá: finds the shortest decimal representation of `self` if it can, or
+    /// the closest if it must.
+    #[inline]
+    /*const*/ fn teju_jagua_inner(self) -> Decimal {
+        if self.mant == 0 { return Decimal { exp: 0, mant: 0 } }
+
+        let exp_floor = self.exp_log10_pow2();
+        let exp_residual = self.exp_log10_pow2_residual();
+        // SAFETY: exp_floor is in bounds
+        let mult = unsafe { MULTIPLIERS.get(exp_floor) };
+
+        // TODO const
+        let M_0: Mant = 1 << (Self::BITS_MANTISSA - 1);
+
+        // Case 1: 
+        if self.mant != M_0 || self.exp == Self::MIN_EXP {
+            let mant_a = (2 * self.mant - 1) << exp_residual;
+            let mant_b = (2 * self.mant + 1) << exp_residual;
+            let a = multiword_multiply_shift(mant_a, mult);
+            let b = multiword_multiply_shift(mant_b, mult);
+            let decimal_a = Decimal{ exp: exp_floor, mant: mant_a };
+            let decimal_b = Decimal{ exp: exp_floor, mant: mant_b };
+
+            let q = b / 10;
+            let s = q * 10;
+            if a < s {
+                if s < b || is_even(self.mant) || !decimal_b.is_tie() {
+                    return Decimal{exp: exp_floor + 1, mant: q }.remove_trailing_zeros()
+                }
+            } else if s == a && is_even(self.mant) && decimal_a.is_tie() {
+                return Decimal{exp: exp_floor + 1, mant: q }.remove_trailing_zeros()
+            } else if !is_even(a + b) {
+                return Decimal{exp: exp_floor, mant: (a + b) / 2 + 1}
+            }
+
+            // Factor out these 5 lines
+            let mant_c = (4 * self.mant) << exp_residual;
+            let c2 = multiword_multiply_shift(mant_c, mult);
+            let c = c2 / 2;
+
+            let round_up = !(is_even(c2) || (is_even(c) && Decimal{exp: -exp_floor, mant: c2}.is_tie()));
+            return Decimal{exp: exp_floor, mant: c + (round_up as Mant)}
+        }
+
+        // Case 2: 
+        else {
+            // self.mant == M_0
+            let mant_a = (4 * M_0 - 1) << exp_residual;
+            let mant_b = (2 * M_0 + 1) << exp_residual;
+            let a = multiword_multiply_shift(mant_a, mult) / 2;
+            let b = multiword_multiply_shift(mant_b, mult);
+            let decimal_a = Decimal{ exp: exp_floor, mant: mant_a };
+            let decimal_b = Decimal{ exp: exp_floor, mant: mant_b };
+
+            if a < b {  // TODO calculation_sorted
+                let q = b / 10;
+                let s = q * 10;
+                if a < s {
+                    if s < b || is_even(M_0) || !decimal_b.is_tie_uncentered() {
+                        return Decimal{exp: exp_floor + 1, mant: q }.remove_trailing_zeros()
+                    }
+                } else if s == a && is_even(M_0) && decimal_a.is_tie_uncentered() {
+                    return Decimal{exp: exp_floor + 1, mant: q }.remove_trailing_zeros()
+                } else if (a + b) % 2 == 1 {
+                    return Decimal{exp: exp_floor, mant: (a + b) / 2 + 1}
+                }
+
+                let log2_mant_c = Self::BITS_MANTISSA + exp_residual + 1;
+                let c2 = multiword_multiply_shift_pow2(log2_mant_c, mult);
+                let c = c2 / 2;
+
+                let round_up = 
+                    (c == a && !decimal_a.is_tie_uncentered())
+                    ||
+                    !(is_even(c2) || (is_even(c) && Decimal{exp: -exp_floor, mant: c2}.is_tie()));
+                return Decimal{exp: exp_floor, mant: c + (round_up as Mant)}
+            } else if decimal_a.is_tie_uncentered() {
+                return Decimal{exp: exp_floor, mant: a}.remove_trailing_zeros()
+            } else {
+                let mant_c = (40 * M_0) << exp_residual;
+                let c2 = multiword_multiply_shift(mant_c, mult);
+                let c = c2 / 2;
+
+                let round_up = !(is_even(c2) || (is_even(c) && Decimal{exp: -exp_floor, mant: c2}.is_tie()));
+                return Decimal{exp: exp_floor - 1, mant: c + (round_up as Mant)}
+            }
+        }
+    }
+
+    /// The final Tejú Jaguá: short-circuits the "small integer" case.
+    pub /*const*/ fn teju_jagua(self) -> Decimal {
+        if self.is_small_integer() {
+            debug_assert!(self.exp <= 0);
+            return Decimal{exp: 0, mant: self.mant >> (-self.exp as u32)}.remove_trailing_zeros()
+        }
+        self.teju_jagua_inner()
+    }
+}
+
+impl Decimal {
+    #[inline]
+    /*const*/ fn is_tie(&self) -> bool {
+        0 <= self.exp && (self.exp as usize) < 27
+            && self.is_multiple_of_pow5()
+    }
+
+    #[inline]
+    /*const*/ fn is_tie_uncentered(&self) -> bool {
+        self.mant % 5 == 0
+            && 0 <= self.exp
+            && self.is_multiple_of_pow5()
+    }
+
+    /// Checks whether `self.mant` is a "small" multiple of `5 ^ self.exp`.
+    #[inline]
+    /*const*/ fn is_multiple_of_pow5(&self) -> bool {
+        // SAFETY: 
+        let entry = unsafe { MULT_INVERSES.get(self.exp) };
+        // self.mant * entry.multiplier <= entry.bound
+        self.mant.wrapping_mul(entry.multiplier) <= entry.bound
+    }
+
+    /// Shortens `self` by removing trailing zeros from `self.mant` while possible, and
+    /// incrementing `self.exp` by the same amount.
+    const fn remove_trailing_zeros(mut self) -> Self {
+        const M_INV5: Mant = -((Mant::MAX / 5) as i64) as Mant;
+        const BOUND: Mant = Mant::MAX / 10 + 1;
+        loop {
+            // let q = (self.mant * M_INV5).rotate_right(1);
+            let q = self.mant.wrapping_mul(M_INV5).rotate_right(1);
+            if q >= BOUND {
+                return self
+            }
+            self.exp += 1;
+            self.mant = q;
+        }
+    }
+
+    /*/// The entry point for the algorithm
+    fn from(num: f64) -> (bool, Self) {
+        let sign = num.is_sign_positive();
+        let decimal
+    }*/
+}
+
+impl Result<Decimal> {
+    #[inline]
+    pub fn new(num: f64) -> Self {
+        let sign = num.is_sign_positive();
+        match Binary::new(num) {
+            Some(binary) => Result::Finite{ sign, decimal: binary.teju_jagua() },
+            None => if num.is_nan() {
+                Result::Nan
+            } else {
+                debug_assert!(num.is_infinite());
+                Result::Inf { sign }
+            }
+        }
+    }
+
+    #[inline]
+    pub fn new_finite(num: f64) -> Self {
+        debug_assert!(num.is_finite());
+        let sign = num.is_sign_positive();
+        Result::Finite{ sign, decimal: Binary::new_finite(num).teju_jagua() }
+    }
+
+    /// Write `num` onto slice starting at `buf`, returning the number of bytes written. If `buf` is
+    /// not big enough to format `num` into, this is *undefined behaviour*.
+    pub unsafe fn format_exp(self, mut buf: *mut u8) -> usize {
+        match self {
+            Result::Finite { sign, decimal } => unsafe { Self::format_inner(sign, decimal, buf) } ,
+            Result::Nan => unsafe { common::write_to(b"NaN", &mut buf) },
+            Result::Inf { sign } => if sign {
+                unsafe { common::write_to(b"inf", &mut buf) }
+            } else {
+                unsafe { common::write_to(b"-inf", &mut buf) }
+            },
+        }
+    }
+
+    pub unsafe fn format_exp_finite(self, buf: *mut u8) -> usize {
+        match self {
+            Result::Finite { sign, decimal } => unsafe { Self::format_inner(sign, decimal, buf) },
+            _ => unsafe { core::hint::unreachable_unchecked() }
+        }
+    }
+
+    #[inline]
+    unsafe fn format_inner(sign: bool, mut decimal: Decimal, mut buf: *mut u8) -> usize {
+        let buf_orig = buf;
+        unsafe {
+            if !sign {
+                let _ = common::write_char_to(b'-', &mut buf);
+            }
+
+            let mut itoa_buf = itoa::Buffer::new();
+
+            let mant = itoa_buf.format(decimal.mant);
+            common::write_char_to(*mant.as_bytes().get_unchecked(0), &mut buf);
+            let mant_len_after_point = mant.len() - 1;
+            if mant_len_after_point == 0 {
+                if decimal.exp == 0 {
+                    common::write_to(b".0", &mut buf);
+                } else {
+                    common::write_char_to(b'e', &mut buf);
+                    common::write_to(itoa_buf.format(decimal.exp).as_bytes(), &mut buf);
+                }
+            } else {
+                decimal.exp += mant_len_after_point as i32;
+                common::write_char_to(b'.', &mut buf);
+                common::write_to(mant.get_unchecked(1..).as_bytes(), &mut buf);
+                common::write_char_to(b'e', &mut buf);
+                common::write_to(itoa_buf.format(decimal.exp).as_bytes(), &mut buf);
+            }
+
+            buf.offset_from(buf_orig) as usize
+        }
+    }
+
+    #[inline]
+    unsafe fn format_inner_exp_fixed(sign: bool, decimal: Decimal, mut buf: *mut u8) -> usize {
+        let buf_orig = buf;
+        unsafe {
+            if sign {
+                common::write_char_to(b'+', &mut buf);
+            } else {
+                common::write_char_to(b'-', &mut buf);
+            }
+
+            let mut itoa_buf = itoa::Buffer::new();
+            common::write_to(itoa_buf.format(decimal.mant).as_bytes(), &mut buf);
+            common::write_char_to(b'e', &mut buf);
+            common::write_to(itoa_buf.format(decimal.exp).as_bytes(), &mut buf);
+
+            buf.offset_from(buf_orig) as usize
+        }
+    }
+}
+
+// TODO generate
+
+const MULTIPLIERS: common::Multipliers<Mant, 617> = common::Multipliers::new([
+    Multiplier{ hi: 0x9e19db92b4e31ba9, lo: 0x6c07a2c26a8346d2 },
+    Multiplier{ hi: 0xfcf62c1dee382c42, lo: 0x46729e03dd9ed7b6 },
+    Multiplier{ hi: 0xca5e89b18b602368, lo: 0x385bb19cb14bdfc5 },
+    Multiplier{ hi: 0xa1e53af46f801c53, lo: 0x60495ae3c1097fd1 },
+    Multiplier{ hi: 0x81842f29f2cce375, lo: 0xe6a1158300d46641 },
+    Multiplier{ hi: 0xcf39e50feae16bef, lo: 0xd768226b34870a01 },
+    Multiplier{ hi: 0xa5c7ea73224deff3, lo: 0x12b9b522906c0801 },
+    Multiplier{ hi: 0x849feec281d7f328, lo: 0xdbc7c41ba6bcd334 },
+    Multiplier{ hi: 0xd433179d9c8cb841, lo: 0x5fa60692a46151ec },
+    Multiplier{ hi: 0xa9c2794ae3a3c69a, lo: 0xb2eb3875504ddb23 },
+    Multiplier{ hi: 0x87cec76f1c830548, lo: 0x8f2293910d0b15b6 },
+    Multiplier{ hi: 0xd94ad8b1c7380874, lo: 0x18375281ae7822bd },
+    Multiplier{ hi: 0xadd57a27d29339f6, lo: 0x79c5db9af1f9b564 },
+    Multiplier{ hi: 0x8b112e86420f6191, lo: 0xfb04afaf27faf783 },
+    Multiplier{ hi: 0xde81e40a034bcf4f, lo: 0xf8077f7ea65e58d2 },
+    Multiplier{ hi: 0xb201833b35d63f73, lo: 0x2cd2cc6551e513db },
+    Multiplier{ hi: 0x8e679c2f5e44ff8f, lo: 0x570f09eaa7ea7649 },
+    Multiplier{ hi: 0xe3d8f9e563a198e5, lo: 0x58180fddd97723a7 },
+    Multiplier{ hi: 0xb6472e511c81471d, lo: 0xe0133fe4adf8e953 },
+    Multiplier{ hi: 0x91d28b7416cdd27e, lo: 0x4cdc331d57fa5442 },
+    Multiplier{ hi: 0xe950df20247c83fd, lo: 0x47c6b82ef32a206a },
+    Multiplier{ hi: 0xbaa718e68396cffd, lo: 0xd30560258f54e6bb },
+    Multiplier{ hi: 0x95527a5202df0ccb, lo: 0x0f37801e0c43ebc9 },
+    Multiplier{ hi: 0xeeea5d5004981478, lo: 0x1858ccfce06cac75 },
+    Multiplier{ hi: 0xbf21e44003acdd2c, lo: 0xe0470a63e6bd56c4 },
+    Multiplier{ hi: 0x98e7e9cccfbd7dbd, lo: 0x8038d51cb897789d },
+    Multiplier{ hi: 0xf4a642e14c6262c8, lo: 0xcd27bb612758c0fb },
+    Multiplier{ hi: 0xc3b8358109e84f07, lo: 0x0a862f80ec4700c9 },
+    Multiplier{ hi: 0x9c935e00d4b9d8d2, lo: 0x6ed1bf9a569f33d4 },
+    Multiplier{ hi: 0xfa856334878fc150, lo: 0xb14f98f6f0feb952 },
+    Multiplier{ hi: 0xc86ab5c39fa63440, lo: 0x8dd9472bf3fefaa8 },
+    Multiplier{ hi: 0xa0555e361951c366, lo: 0xd7e105bcc3326220 },
+    Multiplier{ hi: 0x80444b5e7aa7cf85, lo: 0x7980d163cf5b81b4 },
+    Multiplier{ hi: 0xcd3a1230c43fb26f, lo: 0x28ce1bd2e55f35ec },
+    Multiplier{ hi: 0xa42e74f3d032f525, lo: 0xba3e7ca8b77f5e56 },
+    Multiplier{ hi: 0x83585d8fd9c25db7, lo: 0xc831fd53c5ff7eac },
+    Multiplier{ hi: 0xd226fc195c6a2f8c, lo: 0x73832eec6fff3112 },
+    Multiplier{ hi: 0xa81f301449ee8c70, lo: 0x5c68f256bfff5a75 },
+    Multiplier{ hi: 0x867f59a9d4bed6c0, lo: 0x49ed8eabcccc485e },
+    Multiplier{ hi: 0xd732290fbacaf133, lo: 0xa97c177947ad4096 },
+    Multiplier{ hi: 0xac2820d9623bf429, lo: 0x546345fa9fbdcd45 },
+    Multiplier{ hi: 0x89b9b3e11b6329ba, lo: 0xa9e904c87fcb0a9e },
+    Multiplier{ hi: 0xdc5c5301c56b75f7, lo: 0x7641a140cc7810fc },
+    Multiplier{ hi: 0xb049dc016abc5e5f, lo: 0x91ce1a9a3d2cda63 },
+    Multiplier{ hi: 0x8d07e33455637eb2, lo: 0xdb0b487b6423e1e9 },
+    Multiplier{ hi: 0xe1a63853bbd26451, lo: 0x5e7873f8a0396974 },
+    Multiplier{ hi: 0xb484f9dc9641e9da, lo: 0xb1f9f660802dedf7 },
+    Multiplier{ hi: 0x906a617d450187e2, lo: 0x27fb2b80668b24c6 },
+    Multiplier{ hi: 0xe7109bfba19c0c9d, lo: 0x0cc512670a783ad5 },
+    Multiplier{ hi: 0xb8da1662e7b00a17, lo: 0x3d6a751f3b936244 },
+    Multiplier{ hi: 0x93e1ab8252f33b45, lo: 0xcabb90e5c942b504 },
+    Multiplier{ hi: 0xec9c459d51852ba2, lo: 0xddf8e7d60ed1219f },
+    Multiplier{ hi: 0xbd49d14aa79dbc82, lo: 0x4b2d8644d8a74e19 },
+    Multiplier{ hi: 0x976e41088617ca01, lo: 0xd5be0503e085d814 },
+    Multiplier{ hi: 0xf24a01a73cf2dccf, lo: 0xbc633b39673c8ced },
+    Multiplier{ hi: 0xc1d4ce1f63f57d72, lo: 0xfd1c2f611f63a3f1 },
+    Multiplier{ hi: 0x9b10a4e5e9913128, lo: 0xca7cf2b4191c8327 },
+    Multiplier{ hi: 0xf81aa16fdc1b81da, lo: 0xdd94b7868e94050b },
+    Multiplier{ hi: 0xc67bb4597ce2ce48, lo: 0xb143c6053edcd0d6 },
+    Multiplier{ hi: 0x9ec95d1463e8a506, lo: 0xf4363804324a40ab },
+    Multiplier{ hi: 0xfe0efb53d30dd4d7, lo: 0xed238cd383aa0111 },
+    Multiplier{ hi: 0xcb3f2f7642717713, lo: 0x241c70a936219a74 },
+    Multiplier{ hi: 0xa298f2c501f45f42, lo: 0x8349f3ba91b47b90 },
+    Multiplier{ hi: 0x8213f56a67f6b29b, lo: 0x9c3b29620e29fc74 },
+    Multiplier{ hi: 0xd01fef10a657842c, lo: 0x2d2b7569b0432d86 },
+    Multiplier{ hi: 0xa67ff273b8460356, lo: 0x8a892abaf368f138 },
+    Multiplier{ hi: 0x8533285c936b35de, lo: 0xd53a88958f872760 },
+    Multiplier{ hi: 0xd51ea6fa85785631, lo: 0x552a74227f3ea566 },
+    Multiplier{ hi: 0xaa7eebfb9df9de8d, lo: 0xddbb901b98feeab8 },
+    Multiplier{ hi: 0x8865899617fb1871, lo: 0x7e2fa67c7a658893 },
+    Multiplier{ hi: 0xda3c0f568cc4f3e8, lo: 0xc9e5d72d90a2741f },
+    Multiplier{ hi: 0xae9672aba3d0c320, lo: 0xa184ac2473b529b2 },
+    Multiplier{ hi: 0x8bab8eefb6409c1a, lo: 0x1ad089b6c2f7548f },
+    Multiplier{ hi: 0xdf78e4b2bd342cf6, lo: 0x914da9246b255417 },
+    Multiplier{ hi: 0xb2c71d5bca9023f8, lo: 0x743e20e9ef511013 },
+    Multiplier{ hi: 0x8f05b1163ba6832d, lo: 0x29cb4d87f2a7400f },
+    Multiplier{ hi: 0xe4d5e82392a40515, lo: 0x0fabaf3feaa5334b },
+    Multiplier{ hi: 0xb7118682dbb66a77, lo: 0x3fbc8c33221dc2a2 },
+    Multiplier{ hi: 0x92746b9be2f8552c, lo: 0x32fd3cf5b4e49bb5 },
+    Multiplier{ hi: 0xea53df5fd18d5513, lo: 0x84c86189216dc5ee },
+    Multiplier{ hi: 0xbb764c4ca7a4440f, lo: 0x9d6d1ad41abe37f2 },
+    Multiplier{ hi: 0x95f83d0a1fb69cd9, lo: 0x4abdaf101564f98f },
+    Multiplier{ hi: 0xeff394dcff8a948e, lo: 0xddfc4b4cef07f5b1 },
+    Multiplier{ hi: 0xbff610b0cc6edd3f, lo: 0x17fd090a58d32af4 },
+    Multiplier{ hi: 0x9991a6f3d6bf1765, lo: 0xacca6da1e0a8ef2a },
+    Multiplier{ hi: 0xf5b5d7ec8acb58a2, lo: 0xae10af696774b1dc },
+    Multiplier{ hi: 0xc491798a08a2ad4e, lo: 0xf1a6f2bab92a27e3 },
+    Multiplier{ hi: 0x9d412e0806e88aa5, lo: 0x8e1f289560ee864f },
+    Multiplier{ hi: 0xfb9b7cd9a4a7443c, lo: 0x169840ef017da3b2 },
+    Multiplier{ hi: 0xc94930ae1d529cfc, lo: 0xdee033f26797b628 },
+    Multiplier{ hi: 0xa1075a24e4421730, lo: 0xb24cf65b8612f820 },
+    Multiplier{ hi: 0x80d2ae83e9ce78f3, lo: 0xc1d72b7c6b42601a },
+    Multiplier{ hi: 0xce1de40642e3f4b9, lo: 0x36251260ab9d668f },
+    Multiplier{ hi: 0xa4e4b66b68b65d60, lo: 0xf81da84d56178540 },
+    Multiplier{ hi: 0x83ea2b892091e44d, lo: 0x934aed0aab460433 },
+    Multiplier{ hi: 0xd31045a8341ca07c, lo: 0x1ede48111209a051 },
+    Multiplier{ hi: 0xa8d9d1535ce3b396, lo: 0x7f1839a741a14d0e },
+    Multiplier{ hi: 0x8714a775e3e95c78, lo: 0x65acfaec34810a72 },
+    Multiplier{ hi: 0xd8210befd30efa5a, lo: 0x3c47f7e05401aa4f },
+    Multiplier{ hi: 0xace73cbfdc0bfb7b, lo: 0x636cc64d1001550c },
+    Multiplier{ hi: 0x8a5296ffe33cc92f, lo: 0x82bd6b70d99aaa70 },
+    Multiplier{ hi: 0xdd50f1996b947518, lo: 0xd12f124e28f7771a },
+    Multiplier{ hi: 0xb10d8e1456105dad, lo: 0x7425a83e872c5f48 },
+    Multiplier{ hi: 0x8da471a9de737e24, lo: 0x5ceaecfed289e5d3 },
+    Multiplier{ hi: 0xe2a0b5dc971f303a, lo: 0x2e44ae64840fd61e },
+    Multiplier{ hi: 0xb54d5e4a127f59c8, lo: 0x2503beb6d00cab4c },
+    Multiplier{ hi: 0x910ab1d4db9914a0, lo: 0x1d9c9892400a22a3 },
+    Multiplier{ hi: 0xe8111c87c5c1ba99, lo: 0xc8fa8db6ccdd0438 },
+    Multiplier{ hi: 0xb9a74a0637ce2ee1, lo: 0x6d953e2bd7173693 },
+    Multiplier{ hi: 0x9485d4d1c63e8be7, lo: 0x8addcb5645ac2ba9 },
+    Multiplier{ hi: 0xeda2ee1c7064130c, lo: 0x1162def06f79df74 },
+    Multiplier{ hi: 0xbe1bf1b059e9a8d6, lo: 0x744f18c0592e4c5d },
+    Multiplier{ hi: 0x98165af37b2153de, lo: 0xc3727a337a8b704b },
+    Multiplier{ hi: 0xf356f7ebf83552fe, lo: 0x0583f6b8c4124d44 },
+    Multiplier{ hi: 0xc2abf989935ddbfe, lo: 0x6acff893d00ea436 },
+    Multiplier{ hi: 0x9bbcc7a142b17ccb, lo: 0x88a66076400bb692 },
+    Multiplier{ hi: 0xf92e0c3537826145, lo: 0xa7709a56ccdf8a83 },
+    Multiplier{ hi: 0xc75809c42c684dd1, lo: 0x52c07b78a3e60869 },
+    Multiplier{ hi: 0x9f79a169bd203e41, lo: 0x0f0062c6e984d387 },
+    Multiplier{ hi: 0xff290242c83396ce, lo: 0x7e67047175a15272 },
+    Multiplier{ hi: 0xcc20ce9bd35c78a5, lo: 0x31ec038df7b441f5 },
+    Multiplier{ hi: 0xa34d721642b06084, lo: 0x27f002d7f95d0191 },
+    Multiplier{ hi: 0x82a45b450226b39c, lo: 0xecc0024661173474 },
+    Multiplier{ hi: 0xd106f86e69d785c7, lo: 0xe13336d701beba53 },
+    Multiplier{ hi: 0xa738c6bebb12d16c, lo: 0xb428f8ac016561dc },
+    Multiplier{ hi: 0x85c7056562757456, lo: 0xf6872d5667844e4a },
+    Multiplier{ hi: 0xd60b3bd56a5586f1, lo: 0x8a71e223d8d3b075 },
+    Multiplier{ hi: 0xab3c2fddeeaad25a, lo: 0xd527e81cad7626c4 },
+    Multiplier{ hi: 0x88fcf317f22241e2, lo: 0x441fece3bdf81f04 },
+    Multiplier{ hi: 0xdb2e51bfe9d0696a, lo: 0x06997b05fcc0319f },
+    Multiplier{ hi: 0xaf58416654a6babb, lo: 0x387ac8d1970027b3 },
+    Multiplier{ hi: 0x8c469ab843b89562, lo: 0x93956d7478ccec8f },
+    Multiplier{ hi: 0xe070f78d3927556a, lo: 0x85bbe253f47b1418 },
+    Multiplier{ hi: 0xb38d92d760ec4455, lo: 0x37c981dcc395a9ad },
+    Multiplier{ hi: 0x8fa475791a569d10, lo: 0xf96e017d694487bd },
+    Multiplier{ hi: 0xe5d3ef282a242e81, lo: 0x8f1668c8a86da5fb },
+    Multiplier{ hi: 0xb7dcbf5354e9bece, lo: 0x0c11ed6d538aeb30 },
+    Multiplier{ hi: 0x9316ff75dd87cbd8, lo: 0x09a7f12442d588f3 },
+    Multiplier{ hi: 0xeb57ff22fc0c7959, lo: 0xa90cb506d155a7eb },
+    Multiplier{ hi: 0xbc4665b596706114, lo: 0x873d5d9f0dde1fef },
+    Multiplier{ hi: 0x969eb7c47859e743, lo: 0x9f644ae5a4b1b326 },
+    Multiplier{ hi: 0xf0fdf2d3f3c30b9f, lo: 0x656d44a2a11c51d6 },
+    Multiplier{ hi: 0xc0cb28a98fcf3c7f, lo: 0x84576a1bb416a7de },
+    Multiplier{ hi: 0x9a3c2087a63f6399, lo: 0x36ac54e2f678864c },
+    Multiplier{ hi: 0xf6c69a72a3989f5b, lo: 0x8aad549e57273d46 },
+    Multiplier{ hi: 0xc56baec21c7a1916, lo: 0x088aaa1845b8fdd1 },
+    Multiplier{ hi: 0x9defbf01b061adab, lo: 0x3a0888136afa64a8 },
+    Multiplier{ hi: 0xfcb2cb35e702af78, lo: 0x5cda735244c3d43f },
+    Multiplier{ hi: 0xca28a291859bbf93, lo: 0x7d7b8f7503cfdcff },
+    Multiplier{ hi: 0xa1ba1ba79e1632dc, lo: 0x6462d92a69731733 },
+    Multiplier{ hi: 0x8161afb94b44f57d, lo: 0x1d1be0eebac278f6 },
+    Multiplier{ hi: 0xcf02b2c21207ef2e, lo: 0x94f967e45e03f4bc },
+    Multiplier{ hi: 0xa59bc234db398c25, lo: 0x43fab9837e699096 },
+    Multiplier{ hi: 0x847c9b5d7c2e09b7, lo: 0x69956135febada12 },
+    Multiplier{ hi: 0xd3fa922f2d1675f2, lo: 0x42889b8997915ce9 },
+    Multiplier{ hi: 0xa99541bf57452b28, lo: 0x353a1607ac744a54 },
+    Multiplier{ hi: 0x87aa9aff79042286, lo: 0x90fb44d2f05d0843 },
+    Multiplier{ hi: 0xd910f7ff28069da4, lo: 0x1b2ba1518094da05 },
+    Multiplier{ hi: 0xada72ccc20054ae9, lo: 0xaf561aa79a10ae6b },
+    Multiplier{ hi: 0x8aec23d680043bee, lo: 0x25de7bb9480d5855 },
+    Multiplier{ hi: 0xde469fbd99a05fe3, lo: 0x6fca5f8ed9aef3bc },
+    Multiplier{ hi: 0xb1d219647ae6b31c, lo: 0x596eb2d8ae258fc9 },
+    Multiplier{ hi: 0x8e41ade9fbebc27d, lo: 0x14588f13be847308 },
+    Multiplier{ hi: 0xe39c49765fdf9d94, lo: 0xed5a7e85fda0b80c },
+    Multiplier{ hi: 0xb616a12b7fe617aa, lo: 0x577b986b314d600a },
+    Multiplier{ hi: 0x91abb422ccb812ee, lo: 0xac62e055c10ab33b },
+    Multiplier{ hi: 0xe912b9d1478ceb17, lo: 0x7a37cd5601aab85e },
+    Multiplier{ hi: 0xba756174393d88df, lo: 0x94f971119aeef9e5 },
+    Multiplier{ hi: 0x952ab45cfa97a0b2, lo: 0xdd945a747bf26184 },
+    Multiplier{ hi: 0xeeaaba2e5dbf6784, lo: 0x95ba2a53f983cf39 },
+    Multiplier{ hi: 0xbeeefb584aff8603, lo: 0xaafb550ffacfd8fb },
+    Multiplier{ hi: 0x98bf2f79d5993802, lo: 0xef2f773ffbd97a62 },
+    Multiplier{ hi: 0xf46518c2ef5b8cd1, lo: 0x7eb258665fc25d6a },
+    Multiplier{ hi: 0xc38413cf25e2d70d, lo: 0xfef5138519684abb },
+    Multiplier{ hi: 0x9c69a97284b578d7, lo: 0xff2a760414536efc },
+    Multiplier{ hi: 0xfa42a8b73abbf48c, lo: 0xcb772339ba1f17fa },
+    Multiplier{ hi: 0xc83553c5c8965d3d, lo: 0x6f92829494e5acc8 },
+    Multiplier{ hi: 0xa02aa96b06deb0fd, lo: 0xf2db9baa10b7bd6d },
+    Multiplier{ hi: 0x802221226be55a64, lo: 0xc2494954da2c978a },
+    Multiplier{ hi: 0xcd036837130890a1, lo: 0x36dba887c37a8c10 },
+    Multiplier{ hi: 0xa402b9c5a8d3a6e7, lo: 0x5f16206c9c6209a7 },
+    Multiplier{ hi: 0x8335616aed761f1f, lo: 0x7f44e6bd49e807b9 },
+    Multiplier{ hi: 0xd1ef0244af2364ff, lo: 0x3207d795430cd927 },
+    Multiplier{ hi: 0xa7f26836f282b732, lo: 0x8e6cac7768d7141f },
+    Multiplier{ hi: 0x865b86925b9bc5c2, lo: 0x0b8a2392ba45a9b3 },
+    Multiplier{ hi: 0xd6f8d7509292d603, lo: 0x45a9d2845d3c42b7 },
+    Multiplier{ hi: 0xabfa45da0edbde69, lo: 0x0487db9d17636893 },
+    Multiplier{ hi: 0x899504ae72497eba, lo: 0x6a06494a791c53a9 },
+    Multiplier{ hi: 0xdc21a1171d42645d, lo: 0x76707543f4fa1f74 },
+    Multiplier{ hi: 0xb01ae745b101e9e4, lo: 0x5ec05dcff72e7f90 },
+    Multiplier{ hi: 0x8ce2529e2734bb1d, lo: 0x1899e4a65f58660d },
+    Multiplier{ hi: 0xe16a1dc9d8545e94, lo: 0xf4296dd6fef3d67b },
+    Multiplier{ hi: 0xb454e4a179dd1877, lo: 0x29babe4598c311fc },
+    Multiplier{ hi: 0x9043ea1ac7e41392, lo: 0x87c89837ad68db30 },
+    Multiplier{ hi: 0xe6d3102ad96cec1d, lo: 0xa60dc059157491e6 },
+    Multiplier{ hi: 0xb8a8d9bbe123f017, lo: 0xb80b0047445d4185 },
+    Multiplier{ hi: 0x93ba47c980e98cdf, lo: 0xc66f336c36b10138 },
+    Multiplier{ hi: 0xec5d3fa8ce427aff, lo: 0xa3e51f138ab4cebf },
+    Multiplier{ hi: 0xbd176620a501fbff, lo: 0xb650e5a93bc3d899 },
+    Multiplier{ hi: 0x9745eb4d50ce6332, lo: 0xf840b7ba963646e1 },
+    Multiplier{ hi: 0xf209787bb47d6b84, lo: 0xc0678c5dbd23a49b },
+    Multiplier{ hi: 0xc1a12d2fc3978937, lo: 0x0052d6b1641c83af },
+    Multiplier{ hi: 0x9ae757596946075f, lo: 0x3375788de9b06959 },
+    Multiplier{ hi: 0xf7d88bc24209a565, lo: 0x1f225a7ca91a4227 },
+    Multiplier{ hi: 0xc646d63501a1511d, lo: 0xb281e1fd541501b9 },
+    Multiplier{ hi: 0x9e9f11c4014dda7e, lo: 0x2867e7fddcdd9afb },
+    Multiplier{ hi: 0xfdcb4fa002162a63, lo: 0x73d9732fc7c8f7f7 },
+    Multiplier{ hi: 0xcb090c8001ab551c, lo: 0x5cadf5bfd3072cc6 },
+    Multiplier{ hi: 0xa26da3999aef7749, lo: 0xe3be5e330f38f09e },
+    Multiplier{ hi: 0x81f14fae158c5f6e, lo: 0x4fcb7e8f3f60c07f },
+    Multiplier{ hi: 0xcfe87f7cef46ff16, lo: 0xe612641865679a64 },
+    Multiplier{ hi: 0xa6539930bf6bff45, lo: 0x84db8346b786151d },
+    Multiplier{ hi: 0x850fadc09923329e, lo: 0x03e2cf6bc604ddb1 },
+    Multiplier{ hi: 0xd4e5e2cdc1d1ea96, lo: 0x6c9e18ac7007c91b },
+    Multiplier{ hi: 0xaa51823e34a7eede, lo: 0xbd4b46f0599fd416 },
+    Multiplier{ hi: 0x884134fe908658b2, lo: 0x3109058d147fdcde },
+    Multiplier{ hi: 0xda01ee641a708de9, lo: 0xe80e6f4820cc9496 },
+    Multiplier{ hi: 0xae67f1e9aec07187, lo: 0xecd8590680a3aa12 },
+    Multiplier{ hi: 0x8b865b215899f46c, lo: 0xbd79e0d20082ee75 },
+    Multiplier{ hi: 0xdf3d5e9bc0f653e1, lo: 0x2f2967b66737e3ee },
+    Multiplier{ hi: 0xb2977ee300c50fe7, lo: 0x58edec91ec2cb658 },
+    Multiplier{ hi: 0x8edf98b59a373fec, lo: 0x4724bd4189bd5ead },
+    Multiplier{ hi: 0xe498f455c38b997a, lo: 0x0b6dfb9c0f956448 },
+    Multiplier{ hi: 0xb6e0c377cfa2e12e, lo: 0x6f8b2fb00c77836d },
+    Multiplier{ hi: 0x924d692ca61be758, lo: 0x593c2626705f9c57 },
+    Multiplier{ hi: 0xea1575143cf97226, lo: 0xf52d09d71a3293be },
+    Multiplier{ hi: 0xbb445da9ca61281f, lo: 0x2a8a6e45ae8edc98 },
+    Multiplier{ hi: 0x95d04aee3b80ece5, lo: 0xbba1f1d158724a13 },
+    Multiplier{ hi: 0xefb3ab16c59b14a2, lo: 0xc5cfe94ef3ea101f },
+    Multiplier{ hi: 0xbfc2ef456ae276e8, lo: 0x9e3fedd8c321a67f },
+    Multiplier{ hi: 0x9968bf6abbe85f20, lo: 0x7e998b13cf4e1ecc },
+    Multiplier{ hi: 0xf5746577930d6500, lo: 0xca8f44ec7ee3647a },
+    Multiplier{ hi: 0xc45d1df942711d9a, lo: 0x3ba5d0bd324f8395 },
+    Multiplier{ hi: 0x9d174b2dcec0e47b, lo: 0x62eb0d64283f9c77 },
+    Multiplier{ hi: 0xfb5878494ace3a5f, lo: 0x04ab48a04065c724 },
+    Multiplier{ hi: 0xc913936dd571c84c, lo: 0x03bc3a19cd1e38ea },
+    Multiplier{ hi: 0xa0dc75f1778e39d6, lo: 0x696361ae3db1c722 },
+    Multiplier{ hi: 0x80b05e5ac60b6178, lo: 0x544f8158315b05b5 },
+    Multiplier{ hi: 0xcde6fd5e09abcf26, lo: 0xed4c0226b55e6f87 },
+    Multiplier{ hi: 0xa4b8cab1a1563f52, lo: 0x577001b891185939 },
+    Multiplier{ hi: 0x83c7088e1aab65db, lo: 0x792667c6da79e0fb },
+    Multiplier{ hi: 0xd2d80db02aabd62b, lo: 0xf50a3fa490c30191 },
+    Multiplier{ hi: 0xa8acd7c0222311bc, lo: 0xc40832ea0d68ce0d },
+    Multiplier{ hi: 0x86f0ac99b4e8dafd, lo: 0x69a028bb3ded71a4 },
+    Multiplier{ hi: 0xd7e77a8f87daf7fb, lo: 0xdc33745ec97be907 },
+    Multiplier{ hi: 0xacb92ed9397bf996, lo: 0x49c2c37f07965405 },
+    Multiplier{ hi: 0x8a2dbf142dfcc7ab, lo: 0x6e3569326c784338 },
+    Multiplier{ hi: 0xdd15fe86affad912, lo: 0x49ef0eb713f39ebf },
+    Multiplier{ hi: 0xb0de65388cc8ada8, lo: 0x3b25a55f43294bcc },
+    Multiplier{ hi: 0x8d7eb76070a08aec, lo: 0xfc1e1de5cf543ca3 },
+    Multiplier{ hi: 0xe264589a4dcdab14, lo: 0xc696963c7eed2dd2 },
+    Multiplier{ hi: 0xb51d13aea4a488dd, lo: 0x6babab6398bdbe42 },
+    Multiplier{ hi: 0x90e40fbeea1d3a4a, lo: 0xbc8955e946fe31ce },
+    Multiplier{ hi: 0xe7d34c64a9c85d44, lo: 0x60dbbca87196b617 },
+    Multiplier{ hi: 0xb975d6b6ee39e436, lo: 0xb3e2fd538e122b45 },
+    Multiplier{ hi: 0x945e455f24fb1cf8, lo: 0x8fe8caa93e74ef6b },
+    Multiplier{ hi: 0xed63a231d4c4fb27, lo: 0x4ca7aaa863ee4bde },
+    Multiplier{ hi: 0xbde94e8e43d0c8ec, lo: 0x3d52eeed1cbea318 },
+    Multiplier{ hi: 0x97edd871cfda3a56, lo: 0x97758bf0e3cbb5ad },
+    Multiplier{ hi: 0xf316271c7fc3908a, lo: 0x8bef464e3945ef7b },
+    Multiplier{ hi: 0xc2781f49ffcfa6d5, lo: 0x3cbf6b71c76b25fc },
+    Multiplier{ hi: 0x9b934c3b330c8577, lo: 0x63cc55f49f88eb30 },
+    Multiplier{ hi: 0xf8ebad2b84e0d58b, lo: 0xd2e0898765a7deb3 },
+    Multiplier{ hi: 0xc722f0ef9d80aad6, lo: 0x424d3ad2b7b97ef6 },
+    Multiplier{ hi: 0x9f4f2726179a2245, lo: 0x01d762422c946591 },
+    Multiplier{ hi: 0xfee50b7025c36a08, lo: 0x02f236d04753d5b5 },
+    Multiplier{ hi: 0xcbea6f8ceb02bb39, lo: 0x9bf4f8a69f764491 },
+    Multiplier{ hi: 0xa321f2d7226895c7, lo: 0xaff72d52192b6a0e },
+    Multiplier{ hi: 0x82818f1281ed449f, lo: 0xbff8f10e7a8921a5 },
+    Multiplier{ hi: 0xd0cf4b50cfe20765, lo: 0xfff4b4e3f741cf6e },
+    Multiplier{ hi: 0xa70c3c40a64e6c51, lo: 0x999090b65f67d925 },
+    Multiplier{ hi: 0x85a36366eb71f041, lo: 0x47a6da2b7f864751 },
+    Multiplier{ hi: 0xd5d238a4abe98068, lo: 0x72a4904598d6d881 },
+    Multiplier{ hi: 0xab0e93b6efee0053, lo: 0x8eea0d047a457a01 },
+    Multiplier{ hi: 0x88d8762bf324cd0f, lo: 0xa5880a69fb6ac801 },
+    Multiplier{ hi: 0xdaf3f04651d47b4c, lo: 0x3c0cdd765f114001 },
+    Multiplier{ hi: 0xaf298d050e4395d6, lo: 0x9670b12b7f410001 },
+    Multiplier{ hi: 0x8c213d9da502de45, lo: 0x4526f422cc340001 },
+    Multiplier{ hi: 0xe0352f62a19e306e, lo: 0xd50b2037ad200001 },
+    Multiplier{ hi: 0xb35dbf821ae4f38b, lo: 0xdda2802c8a800001 },
+    Multiplier{ hi: 0x8f7e32ce7bea5c6f, lo: 0xe4820023a2000001 },
+    Multiplier{ hi: 0xe596b7b0c643c719, lo: 0x6d9ccd05d0000001 },
+    Multiplier{ hi: 0xb7abc627050305ad, lo: 0xf14a3d9e40000001 },
+    Multiplier{ hi: 0x92efd1b8d0cf37be, lo: 0x5aa1cae500000001 },
+    Multiplier{ hi: 0xeb194f8e1ae525fd, lo: 0x5dcfab0800000001 },
+    Multiplier{ hi: 0xbc143fa4e250eb31, lo: 0x17d955a000000001 },
+    Multiplier{ hi: 0x96769950b50d88f4, lo: 0x1314448000000001 },
+    Multiplier{ hi: 0xf0bdc21abb48db20, lo: 0x1e86d40000000001 },
+    Multiplier{ hi: 0xc097ce7bc90715b3, lo: 0x4b9f100000000001 },
+    Multiplier{ hi: 0x9a130b963a6c115c, lo: 0x3c7f400000000001 },
+    Multiplier{ hi: 0xf684df56c3e01bc6, lo: 0xc732000000000001 },
+    Multiplier{ hi: 0xc5371912364ce305, lo: 0x6c28000000000001 },
+    Multiplier{ hi: 0x9dc5ada82b70b59d, lo: 0xf020000000000001 },
+    Multiplier{ hi: 0xfc6f7c4045812296, lo: 0x4d00000000000001 },
+    Multiplier{ hi: 0xc9f2c9cd04674ede, lo: 0xa400000000000001 },
+    Multiplier{ hi: 0xa18f07d736b90be5, lo: 0x5000000000000001 },
+    Multiplier{ hi: 0x813f3978f8940984, lo: 0x4000000000000001 },
+    Multiplier{ hi: 0xcecb8f27f4200f3a, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xa56fa5b99019a5c8, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0x84595161401484a0, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xd3c21bcecceda100, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xa968163f0a57b400, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0x878678326eac9000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xd8d726b7177a8000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xad78ebc5ac620000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0x8ac7230489e80000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xde0b6b3a76400000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xb1a2bc2ec5000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0x8e1bc9bf04000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xe35fa931a0000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xb5e620f480000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0x9184e72a00000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xe8d4a51000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xba43b74000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0x9502f90000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xee6b280000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xbebc200000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0x9896800000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xf424000000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xc350000000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0x9c40000000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xfa00000000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xc800000000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xa000000000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0x8000000000000000, lo: 0x0000000000000001 },
+    Multiplier{ hi: 0xcccccccccccccccc, lo: 0xcccccccccccccccd },
+    Multiplier{ hi: 0xa3d70a3d70a3d70a, lo: 0x3d70a3d70a3d70a4 },
+    Multiplier{ hi: 0x83126e978d4fdf3b, lo: 0x645a1cac083126ea },
+    Multiplier{ hi: 0xd1b71758e219652b, lo: 0xd3c36113404ea4a9 },
+    Multiplier{ hi: 0xa7c5ac471b478423, lo: 0x0fcf80dc33721d54 },
+    Multiplier{ hi: 0x8637bd05af6c69b5, lo: 0xa63f9a49c2c1b110 },
+    Multiplier{ hi: 0xd6bf94d5e57a42bc, lo: 0x3d32907604691b4d },
+    Multiplier{ hi: 0xabcc77118461cefc, lo: 0xfdc20d2b36ba7c3e },
+    Multiplier{ hi: 0x89705f4136b4a597, lo: 0x31680a88f8953031 },
+    Multiplier{ hi: 0xdbe6fecebdedd5be, lo: 0xb573440e5a884d1c },
+    Multiplier{ hi: 0xafebff0bcb24aafe, lo: 0xf78f69a51539d749 },
+    Multiplier{ hi: 0x8cbccc096f5088cb, lo: 0xf93f87b7442e45d4 },
+    Multiplier{ hi: 0xe12e13424bb40e13, lo: 0x2865a5f206b06fba },
+    Multiplier{ hi: 0xb424dc35095cd80f, lo: 0x538484c19ef38c95 },
+    Multiplier{ hi: 0x901d7cf73ab0acd9, lo: 0x0f9d37014bf60a11 },
+    Multiplier{ hi: 0xe69594bec44de15b, lo: 0x4c2ebe687989a9b4 },
+    Multiplier{ hi: 0xb877aa3236a4b449, lo: 0x09befeb9fad487c3 },
+    Multiplier{ hi: 0x9392ee8e921d5d07, lo: 0x3aff322e62439fd0 },
+    Multiplier{ hi: 0xec1e4a7db69561a5, lo: 0x2b31e9e3d06c32e6 },
+    Multiplier{ hi: 0xbce5086492111aea, lo: 0x88f4bb1ca6bcf585 },
+    Multiplier{ hi: 0x971da05074da7bee, lo: 0xd3f6fc16ebca5e04 },
+    Multiplier{ hi: 0xf1c90080baf72cb1, lo: 0x5324c68b12dd6339 },
+    Multiplier{ hi: 0xc16d9a0095928a27, lo: 0x75b7053c0f178294 },
+    Multiplier{ hi: 0x9abe14cd44753b52, lo: 0xc4926a9672793543 },
+    Multiplier{ hi: 0xf79687aed3eec551, lo: 0x3a83ddbd83f52205 },
+    Multiplier{ hi: 0xc612062576589dda, lo: 0x95364afe032a819e },
+    Multiplier{ hi: 0x9e74d1b791e07e48, lo: 0x775ea264cf55347e },
+    Multiplier{ hi: 0xfd87b5f28300ca0d, lo: 0x8bca9d6e188853fd },
+    Multiplier{ hi: 0xcad2f7f5359a3b3e, lo: 0x096ee45813a04331 },
+    Multiplier{ hi: 0xa2425ff75e14fc31, lo: 0xa1258379a94d028e },
+    Multiplier{ hi: 0x81ceb32c4b43fcf4, lo: 0x80eacf948770ced8 },
+    Multiplier{ hi: 0xcfb11ead453994ba, lo: 0x67de18eda5814af3 },
+    Multiplier{ hi: 0xa6274bbdd0fadd61, lo: 0xecb1ad8aeacdd58f },
+    Multiplier{ hi: 0x84ec3c97da624ab4, lo: 0xbd5af13bef0b113f },
+    Multiplier{ hi: 0xd4ad2dbfc3d07787, lo: 0x955e4ec64b44e865 },
+    Multiplier{ hi: 0xaa242499697392d2, lo: 0xdde50bd1d5d0b9ea },
+    Multiplier{ hi: 0x881cea14545c7575, lo: 0x7e50d64177da2e55 },
+    Multiplier{ hi: 0xd9c7dced53c72255, lo: 0x96e7bd358c904a22 },
+    Multiplier{ hi: 0xae397d8aa96c1b77, lo: 0xabec975e0a0d081b },
+    Multiplier{ hi: 0x8b61313bbabce2c6, lo: 0x2323ac4b3b3da016 },
+    Multiplier{ hi: 0xdf01e85f912e37a3, lo: 0x6b6c46dec52f6689 },
+    Multiplier{ hi: 0xb267ed1940f1c61c, lo: 0x55f038b237591ed4 },
+    Multiplier{ hi: 0x8eb98a7a9a5b04e3, lo: 0x77f3608e92adb243 },
+    Multiplier{ hi: 0xe45c10c42a2b3b05, lo: 0x8cb89a7db77c506b },
+    Multiplier{ hi: 0xb6b00d69bb55c8d1, lo: 0x3d607b97c5fd0d23 },
+    Multiplier{ hi: 0x9226712162ab070d, lo: 0xcab3961304ca70e9 },
+    Multiplier{ hi: 0xe9d71b689dde71af, lo: 0xaab8f01e6e10b4a7 },
+    Multiplier{ hi: 0xbb127c53b17ec159, lo: 0x5560c018580d5d53 },
+    Multiplier{ hi: 0x95a8637627989aad, lo: 0xdde7001379a44aa9 },
+    Multiplier{ hi: 0xef73d256a5c0f77c, lo: 0x963e66858f6d4441 },
+    Multiplier{ hi: 0xbf8fdb78849a5f96, lo: 0xde98520472bdd034 },
+    Multiplier{ hi: 0x993fe2c6d07b7fab, lo: 0xe546a8038efe402a },
+    Multiplier{ hi: 0xf53304714d9265df, lo: 0xd53dd99f4b3066a9 },
+    Multiplier{ hi: 0xc428d05aa4751e4c, lo: 0xaa97e14c3c26b887 },
+    Multiplier{ hi: 0x9ced737bb6c4183d, lo: 0x55464dd69685606c },
+    Multiplier{ hi: 0xfb158592be068d2e, lo: 0xeed6e2f0f0d56713 },
+    Multiplier{ hi: 0xc8de047564d20a8b, lo: 0xf245825a5a445276 },
+    Multiplier{ hi: 0xa0b19d2ab70e6ed6, lo: 0x5b6aceaeae9d0ec5 },
+    Multiplier{ hi: 0x808e17555f3ebf11, lo: 0xe2bbd88bbee40bd1 },
+    Multiplier{ hi: 0xcdb02555653131b6, lo: 0x3792f412cb06794e },
+    Multiplier{ hi: 0xa48ceaaab75a8e2b, lo: 0x5fa8c3423c052dd8 },
+    Multiplier{ hi: 0x83a3eeeef9153e89, lo: 0x1953cf68300424ad },
+    Multiplier{ hi: 0xd29fe4b18e88640e, lo: 0x8eec7f0d19a03aae },
+    Multiplier{ hi: 0xa87fea27a539e9a5, lo: 0x3f2398d747b36225 },
+    Multiplier{ hi: 0x86ccbb52ea94baea, lo: 0x98e947129fc2b4ea },
+    Multiplier{ hi: 0xd7adf884aa879177, lo: 0x5b0ed81dcc6abb10 },
+    Multiplier{ hi: 0xac8b2d36eed2dac5, lo: 0xe272467e3d222f40 },
+    Multiplier{ hi: 0x8a08f0f8bf0f156b, lo: 0x1b8e9ecb641b5900 },
+    Multiplier{ hi: 0xdcdb1b2798182244, lo: 0xf8e431456cf88e66 },
+    Multiplier{ hi: 0xb0af48ec79ace837, lo: 0x2d835a9df0c6d852 },
+    Multiplier{ hi: 0x8d590723948a535f, lo: 0x579c487e5a38ad0f },
+    Multiplier{ hi: 0xe2280b6c20dd5232, lo: 0x25c6da63c38de1b1 },
+    Multiplier{ hi: 0xb4ecd5f01a4aa828, lo: 0x1e38aeb6360b1af4 },
+    Multiplier{ hi: 0x90bd77f3483bb9b9, lo: 0xb1c6f22b5e6f48c3 },
+    Multiplier{ hi: 0xe7958cb87392c2c2, lo: 0xb60b1d1230b20e05 },
+    Multiplier{ hi: 0xb94470938fa89bce, lo: 0xf808e40e8d5b3e6a },
+    Multiplier{ hi: 0x9436c0760c86e30b, lo: 0xf9a0b6720aaf6522 },
+    Multiplier{ hi: 0xed246723473e3813, lo: 0x290123e9aab23b69 },
+    Multiplier{ hi: 0xbdb6b8e905cb600f, lo: 0x5400e987bbc1c921 },
+    Multiplier{ hi: 0x97c560ba6b0919a5, lo: 0xdccd879fc967d41b },
+    Multiplier{ hi: 0xf2d56790ab41c2a2, lo: 0xfae27299423fb9c4 },
+    Multiplier{ hi: 0xc24452da229b021b, lo: 0xfbe85badce996169 },
+    Multiplier{ hi: 0x9b69dbe1b548ce7c, lo: 0xc986afbe3ee11abb },
+    Multiplier{ hi: 0xf8a95fcf88747d94, lo: 0x75a44c6397ce912b },
+    Multiplier{ hi: 0xc6ede63fa05d3143, lo: 0x91503d1c79720dbc },
+    Multiplier{ hi: 0x9f24b832e6b0f436, lo: 0x0dd9ca7d2df4d7ca },
+    Multiplier{ hi: 0xfea126b7d78186bc, lo: 0xe2f610c84987bfa9 },
+    Multiplier{ hi: 0xcbb41ef979346bca, lo: 0x4f2b40a03ad2ffba },
+    Multiplier{ hi: 0xa2f67f2dfa90563b, lo: 0x728900802f0f32fb },
+    Multiplier{ hi: 0x825ecc24c873782f, lo: 0x8ed400668c0c28c9 },
+    Multiplier{ hi: 0xd097ad07a71f26b2, lo: 0x7e2000a41346a7a8 },
+    Multiplier{ hi: 0xa6dfbd9fb8e5b88e, lo: 0xcb4ccd500f6bb953 },
+    Multiplier{ hi: 0x857fcae62d8493a5, lo: 0x6f70a4400c562ddc },
+    Multiplier{ hi: 0xd59944a37c0752a2, lo: 0x4be76d3346f04960 },
+    Multiplier{ hi: 0xaae103b5fcd2a881, lo: 0xd652bdc29f26a11a },
+    Multiplier{ hi: 0x88b402f7fd75539b, lo: 0x11dbcb0218ebb415 },
+    Multiplier{ hi: 0xdab99e59958885c4, lo: 0xe95fab368e45ecee },
+    Multiplier{ hi: 0xaefae51477a06b03, lo: 0xede622920b6b23f2 },
+    Multiplier{ hi: 0x8bfbea76c619ef36, lo: 0x57eb4edb3c55b65b },
+    Multiplier{ hi: 0xdff9772470297ebd, lo: 0x59787e2b93bc56f8 },
+    Multiplier{ hi: 0xb32df8e9f3546564, lo: 0x47939822dc96abfa },
+    Multiplier{ hi: 0x8f57fa54c2a9eab6, lo: 0x9fa946824a12232e },
+    Multiplier{ hi: 0xe55990879ddcaabd, lo: 0xcc420a6a101d0516 },
+    Multiplier{ hi: 0xb77ada0617e3bbcb, lo: 0x09ce6ebb40173745 },
+    Multiplier{ hi: 0x92c8ae6b464fc96f, lo: 0x3b0b8bc90012929e },
+    Multiplier{ hi: 0xeadab0aba3b2dbe5, lo: 0x2b45ac74ccea842f },
+    Multiplier{ hi: 0xbbe226efb628afea, lo: 0x890489f70a55368c },
+    Multiplier{ hi: 0x964e858c91ba2655, lo: 0x3a6a07f8d510f870 },
+    Multiplier{ hi: 0xf07da27a82c37088, lo: 0x5d767327bb4e5a4d },
+    Multiplier{ hi: 0xc06481fb9bcf8d39, lo: 0xe45ec2862f71e1d7 },
+    Multiplier{ hi: 0x99ea0196163fa42e, lo: 0x504bced1bf8e4e46 },
+    Multiplier{ hi: 0xf64335bcf065d37d, lo: 0x4d4617b5ff4a16d6 },
+    Multiplier{ hi: 0xc5029163f384a931, lo: 0x0a9e795e65d4df12 },
+    Multiplier{ hi: 0x9d9ba7832936edc0, lo: 0xd54b944b84aa4c0e },
+    Multiplier{ hi: 0xfc2c3f3841f17c67, lo: 0xbbac2078d443ace3 },
+    Multiplier{ hi: 0xc9bcff6034c13052, lo: 0xfc89b393dd02f0b6 },
+    Multiplier{ hi: 0xa163ff802a3426a8, lo: 0xca07c2dcb0cf26f8 },
+    Multiplier{ hi: 0x811ccc668829b887, lo: 0x0806357d5a3f5260 },
+    Multiplier{ hi: 0xce947a3da6a9273e, lo: 0x733d226229feea33 },
+    Multiplier{ hi: 0xa54394fe1eedb8fe, lo: 0xc2974eb4ee658829 },
+    Multiplier{ hi: 0x843610cb4bf160cb, lo: 0xcedf722a585139bb },
+    Multiplier{ hi: 0xd389b47879823479, lo: 0x4aff1d108d4ec2c4 },
+    Multiplier{ hi: 0xa93af6c6c79b5d2d, lo: 0xd598e40d3dd89bd0 },
+    Multiplier{ hi: 0x87625f056c7c4a8b, lo: 0x11471cd764ad4973 },
+    Multiplier{ hi: 0xd89d64d57a607744, lo: 0xe871c7bf077ba8b8 },
+    Multiplier{ hi: 0xad4ab7112eb3929d, lo: 0x86c16c98d2c953c7 },
+    Multiplier{ hi: 0x8aa22c0dbef60ee4, lo: 0x6bcdf07a423aa96c },
+    Multiplier{ hi: 0xddd0467c64bce4a0, lo: 0xac7cb3f6d05ddbdf },
+    Multiplier{ hi: 0xb1736b96b6fd83b3, lo: 0xbd308ff8a6b17cb3 },
+    Multiplier{ hi: 0x8df5efabc5979c8f, lo: 0xca8d3ffa1ef463c2 },
+    Multiplier{ hi: 0xe3231912d5bf60e6, lo: 0x10e1fff697ed6c6a },
+    Multiplier{ hi: 0xb5b5ada8aaff80b8, lo: 0x0d819992132456bb },
+    Multiplier{ hi: 0x915e2486ef32cd60, lo: 0x0ace1474dc1d122f },
+    Multiplier{ hi: 0xe896a0d7e51e1566, lo: 0x77b020baf9c81d18 },
+    Multiplier{ hi: 0xba121a4650e4ddeb, lo: 0x92f34d62616ce414 },
+    Multiplier{ hi: 0x94db483840b717ef, lo: 0xa8c2a44eb4571cdd },
+    Multiplier{ hi: 0xee2ba6c0678b597f, lo: 0x746aa07ded582e2d },
+    Multiplier{ hi: 0xbe89523386091465, lo: 0xf6bbb397f1135824 },
+    Multiplier{ hi: 0x986ddb5c6b3a76b7, lo: 0xf89629465a75e01d },
+    Multiplier{ hi: 0xf3e2f893dec3f126, lo: 0x5a89dba3c3efccfb },
+    Multiplier{ hi: 0xc31bfa0fe5698db8, lo: 0x486e494fcff30a63 },
+    Multiplier{ hi: 0x9c1661a651213e2d, lo: 0x06bea10ca65c084f },
+    Multiplier{ hi: 0xf9bd690a1b68637b, lo: 0x3dfdce7aa3c673b1 },
+    Multiplier{ hi: 0xc7caba6e7c5382c8, lo: 0xfe64a52ee96b8fc1 },
+    Multiplier{ hi: 0x9fd561f1fd0f9bd3, lo: 0xfeb6ea8bedefa634 },
+    Multiplier{ hi: 0xffbbcfe994e5c61f, lo: 0xfdf17746497f7053 },
+    Multiplier{ hi: 0xcc963fee10b7d1b3, lo: 0x318df905079926a9 },
+    Multiplier{ hi: 0xa3ab66580d5fdaf5, lo: 0xc13e60d0d2e0ebbb },
+    Multiplier{ hi: 0x82ef85133de648c4, lo: 0x9a984d73dbe722fc },
+    Multiplier{ hi: 0xd17f3b51fca3a7a0, lo: 0xf75a15862ca504c6 },
+    Multiplier{ hi: 0xa798fc4196e952e7, lo: 0x2c48113823b73705 },
+    Multiplier{ hi: 0x8613fd0145877585, lo: 0xbd06742ce95f5f37 },
+    Multiplier{ hi: 0xd686619ba27255a2, lo: 0xc80a537b0efefebe },
+    Multiplier{ hi: 0xab9eb47c81f5114f, lo: 0x066ea92f3f326565 },
+    Multiplier{ hi: 0x894bc396ce5da772, lo: 0x6b8bba8c328eb784 },
+    Multiplier{ hi: 0xdbac6c247d62a583, lo: 0xdf45f746b74abf3a },
+    Multiplier{ hi: 0xafbd2350644eeacf, lo: 0xe5d1929ef90898fb },
+    Multiplier{ hi: 0x8c974f7383725573, lo: 0x1e414218c73a13fc },
+    Multiplier{ hi: 0xe0f218b8d25088b8, lo: 0x306869c13ec3532d },
+    Multiplier{ hi: 0xb3f4e093db73a093, lo: 0x59ed216765690f57 },
+    Multiplier{ hi: 0x8ff71a0fe2c2e6dc, lo: 0x47f0e785eaba72ac },
+    Multiplier{ hi: 0xe65829b3046b0afa, lo: 0x0cb4a5a3112a5113 },
+    Multiplier{ hi: 0xb84687c269ef3bfb, lo: 0x3d5d514f40eea743 },
+    Multiplier{ hi: 0x936b9fcebb25c995, lo: 0xcab10dd900beec35 },
+    Multiplier{ hi: 0xebdf661791d60f56, lo: 0x111b495b3464ad22 },
+    Multiplier{ hi: 0xbcb2b812db11a5de, lo: 0x7415d448f6b6f0e8 },
+    Multiplier{ hi: 0x96f5600f15a7b7e5, lo: 0x29ab103a5ef8c0ba },
+    Multiplier{ hi: 0xf18899b1bc3f8ca1, lo: 0xdc44e6c3cb279ac2 },
+    Multiplier{ hi: 0xc13a148e3032d6e7, lo: 0xe36a52363c1faf02 },
+    Multiplier{ hi: 0x9a94dd3e8cf578b9, lo: 0x82bb74f8301958cf },
+    Multiplier{ hi: 0xf7549530e188c128, lo: 0xd12bee59e68ef47d },
+    Multiplier{ hi: 0xc5dd44271ad3cdba, lo: 0x40eff1e1853f29fe },
+    Multiplier{ hi: 0x9e4a9cec15763e2e, lo: 0x9a598e4e043287ff },
+    Multiplier{ hi: 0xfd442e4688bd304a, lo: 0x908f4a166d1da664 },
+    Multiplier{ hi: 0xca9cf1d206fdc03b, lo: 0xa6d90811f0e4851d },
+    Multiplier{ hi: 0xa21727db38cb002f, lo: 0xb8ada00e5a506a7d },
+    Multiplier{ hi: 0x81ac1fe293d599bf, lo: 0xc6f14cd848405531 },
+    Multiplier{ hi: 0xcf79cc9db955c2cc, lo: 0x7182148d4066eeb5 },
+    Multiplier{ hi: 0xa5fb0a17c777cf09, lo: 0xf468107100525891 },
+    Multiplier{ hi: 0x84c8d4dfd2c63f3b, lo: 0x29ecd9f40041e074 },
+    Multiplier{ hi: 0xd47487cc8470652b, lo: 0x7647c32000696720 },
+    Multiplier{ hi: 0xa9f6d30a038d1dbc, lo: 0x5e9fcf4ccd211f4d },
+    Multiplier{ hi: 0x87f8a8d4cfa417c9, lo: 0xe54ca5d70a80e5d7 },
+    Multiplier{ hi: 0xd98ddaee19068c76, lo: 0x3badd624dd9b0958 },
+    Multiplier{ hi: 0xae0b158b4738705e, lo: 0x9624ab50b148d446 },
+    Multiplier{ hi: 0x8b3c113c38f9f37e, lo: 0xde83bc408dd3dd05 },
+    Multiplier{ hi: 0xdec681f9f4c31f31, lo: 0x6405fa00e2ec94d5 },
+    Multiplier{ hi: 0xb23867fb2a35b28d, lo: 0xe99e619a4f23aa44 },
+    Multiplier{ hi: 0x8e938662882af53e, lo: 0x547eb47b7282ee9d },
+    Multiplier{ hi: 0xe41f3d6a7377eeca, lo: 0x20caba5f1d9e4a94 },
+    Multiplier{ hi: 0xb67f6455292cbf08, lo: 0x1a3bc84c17b1d543 },
+    Multiplier{ hi: 0x91ff83775423cc06, lo: 0x7b6306a34627ddd0 },
+    Multiplier{ hi: 0xe998d258869facd7, lo: 0x2bd1a438703fc94c },
+    Multiplier{ hi: 0xbae0a846d2195712, lo: 0x8974836059cca10a },
+    Multiplier{ hi: 0x9580869f0e7aac0e, lo: 0xd45d35e6ae3d4da1 },
+    Multiplier{ hi: 0xef340a98172aace4, lo: 0x86fb897116c87c35 },
+    Multiplier{ hi: 0xbf5cd54678eef0b6, lo: 0xd262d45a78a0635e },
+    Multiplier{ hi: 0x991711052d8bf3c5, lo: 0x751bdd152d4d1c4b },
+    Multiplier{ hi: 0xf4f1b4d515acb93b, lo: 0xee92fb5515482d45 },
+    Multiplier{ hi: 0xc3f490aa77bd60fc, lo: 0xbedbfc4411068a9d },
+    Multiplier{ hi: 0x9cc3a6eec6311a63, lo: 0xcbe3303674053bb1 },
+    Multiplier{ hi: 0xfad2a4b13d1b5d6c, lo: 0x796b805720085f82 },
+    Multiplier{ hi: 0xc8a883c0fdaf7df0, lo: 0x6122cd128006b2ce },
+    Multiplier{ hi: 0xa086cfcd97bf97f3, lo: 0x80e8a40eccd228a5 },
+    Multiplier{ hi: 0x806bd9714632dff6, lo: 0x00ba1cd8a3db53b7 },
+    Multiplier{ hi: 0xcd795be870516656, lo: 0x67902e276c921f8c },
+    Multiplier{ hi: 0xa46116538d0deb78, lo: 0x52d9be85f074e609 },
+    Multiplier{ hi: 0x8380dea93da4bc60, lo: 0x4247cb9e59f71e6e },
+    Multiplier{ hi: 0xd267caa862a12d66, lo: 0xd072df63c324fd7c },
+    Multiplier{ hi: 0xa8530886b54dbdeb, lo: 0xd9f57f830283fdfd },
+    Multiplier{ hi: 0x86a8d39ef77164bc, lo: 0xae5dff9c02033198 },
+    Multiplier{ hi: 0xd77485cb25823ac7, lo: 0x7d633293366b828c },
+    Multiplier{ hi: 0xac5d37d5b79b6239, lo: 0x311c2875c522ced6 },
+    Multiplier{ hi: 0x89e42caaf9491b60, lo: 0xf41686c49db57245 },
+    Multiplier{ hi: 0xdca04777f541c567, lo: 0xecf0d7a0fc5583a1 },
+    Multiplier{ hi: 0xb080392cc4349dec, lo: 0xbd8d794d96aacfb4 },
+    Multiplier{ hi: 0x8d3360f09cf6e4bd, lo: 0x64712dd7abbbd95d },
+    Multiplier{ hi: 0xe1ebce4dc7f16dfb, lo: 0xd3e8495912c62895 },
+    Multiplier{ hi: 0xb4bca50b065abe63, lo: 0x0fed077a756b53aa },
+    Multiplier{ hi: 0x9096ea6f3848984f, lo: 0x3ff0d2c85def7622 },
+    Multiplier{ hi: 0xe757dd7ec07426e5, lo: 0x331aeada2fe589d0 },
+    Multiplier{ hi: 0xb913179899f68584, lo: 0x28e2557b59846e40 },
+    Multiplier{ hi: 0x940f4613ae5ed136, lo: 0x871b7795e136be9a },
+    Multiplier{ hi: 0xece53cec4a314ebd, lo: 0xa4f8bf5635246429 },
+    Multiplier{ hi: 0xbd8430bd08277231, lo: 0x50c6ff782a838354 },
+    Multiplier{ hi: 0x979cf3ca6cec5b5a, lo: 0xa705992ceecf9c43 },
+    Multiplier{ hi: 0xf294b943e17a2bc4, lo: 0x3e6f5b7b17b2939e },
+    Multiplier{ hi: 0xc21094364dfb5636, lo: 0x985915fc12f542e5 },
+    Multiplier{ hi: 0x9b407691d7fc44f8, lo: 0x79e0de63425dcf1e },
+    Multiplier{ hi: 0xf867241c8cc6d4c0, lo: 0xc30163d203c94b63 },
+    Multiplier{ hi: 0xc6b8e9b0709f109a, lo: 0x359ab6419ca1091c },
+    Multiplier{ hi: 0x9efa548d26e5a6e1, lo: 0xc47bc5014a1a6db0 },
+    Multiplier{ hi: 0xfe5d54150b090b02, lo: 0xd3f93b35435d7c4d },
+    Multiplier{ hi: 0xcb7ddcdda26da268, lo: 0xa9942f5dcf7dfd0a },
+    Multiplier{ hi: 0xa2cb1717b52481ed, lo: 0x54768c4b0c64ca6f },
+    Multiplier{ hi: 0x823c12795db6ce57, lo: 0x76c53d08d6b70859 },
+    Multiplier{ hi: 0xd0601d8efc57b08b, lo: 0xf13b94daf124da27 },
+    Multiplier{ hi: 0xa6b34ad8c9dfc06f, lo: 0xf42faa48c0ea481f },
+    Multiplier{ hi: 0x855c3be0a17fcd26, lo: 0x5cf2eea09a550680 },
+    Multiplier{ hi: 0xd5605fcdcf32e1d6, lo: 0xfb1e4a9a90880a65 },
+    Multiplier{ hi: 0xaab37fd7d8f58178, lo: 0xc8e5087ba6d33b84 },
+    Multiplier{ hi: 0x888f99797a5e012d, lo: 0x6d8406c952429604 },
+    Multiplier{ hi: 0xda7f5bf590966848, lo: 0xaf39a475506a899f },
+    Multiplier{ hi: 0xaecc49914078536d, lo: 0x58fae9f773886e19 },
+    Multiplier{ hi: 0x8bd6a141006042bd, lo: 0xe0c8bb2c5c6d24e1 },
+    Multiplier{ hi: 0xdfbdcece67006ac9, lo: 0x67a791e093e1d49b },
+    Multiplier{ hi: 0xb2fe3f0b8599ef07, lo: 0x861fa7e6dcb4aa16 },
+    Multiplier{ hi: 0x8f31cc0937ae58d2, lo: 0xd1b2ecb8b0908811 },
+    Multiplier{ hi: 0xe51c79a85916f484, lo: 0x82b7e12780e7401b },
+    Multiplier{ hi: 0xb749faed14125d36, lo: 0xcef980ec671f667c },
+    Multiplier{ hi: 0x92a1958a7675175f, lo: 0x0bfacd89ec191eca },
+    Multiplier{ hi: 0xea9c227723ee8bcb, lo: 0x465e15a979c1cadd },
+    Multiplier{ hi: 0xbbb01b9283253ca2, lo: 0x9eb1aaedfb016f17 },
+    Multiplier{ hi: 0x96267c7535b763b5, lo: 0x4bc1558b2f3458df },
+    Multiplier{ hi: 0xf03d93eebc589f88, lo: 0x793555ab7eba27cb },
+    Multiplier{ hi: 0xc0314325637a1939, lo: 0xfa911155fefb5309 },
+    Multiplier{ hi: 0x99c102844f94e0fb, lo: 0x2eda7444cbfc426e },
+    Multiplier{ hi: 0xf6019da07f549b2b, lo: 0x7e2a53a146606a49 },
+    Multiplier{ hi: 0xc4ce17b399107c22, lo: 0xcb550fb4384d21d4 },
+    Multiplier{ hi: 0x9d71ac8fada6c9b5, lo: 0x6f773fc3603db4aa },
+    Multiplier{ hi: 0xfbe9141915d7a922, lo: 0x4bf1ff9f0062baa9 },
+    Multiplier{ hi: 0xc987434744ac874e, lo: 0xa327ffb266b56221 },
+    Multiplier{ hi: 0xa139029f6a239f72, lo: 0x1c1fffc1ebc44e81 },
+    Multiplier{ hi: 0x80fa687f881c7f8e, lo: 0x7ce66634bc9d0b9a },
+    Multiplier{ hi: 0xce5d73ff402d98e3, lo: 0xfb0a3d212dc81290 },
+    Multiplier{ hi: 0xa5178fff668ae0b6, lo: 0x626e974dbe39a873 },
+    Multiplier{ hi: 0x8412d9991ed58091, lo: 0xe858790afe9486c3 },
+    Multiplier{ hi: 0xd3515c2831559a83, lo: 0x0d5a5b44ca873e04 },
+    Multiplier{ hi: 0xa90de3535aaae202, lo: 0x711515d0a205cb37 },
+    Multiplier{ hi: 0x873e4f75e2224e68, lo: 0x5a7744a6e804a292 },
+    Multiplier{ hi: 0xd863b256369d4a40, lo: 0x90bed43e40076a83 },
+    Multiplier{ hi: 0xad1c8eab5ee43b66, lo: 0xda3243650005eed0 },
+    Multiplier{ hi: 0x8a7d3eef7f1cfc52, lo: 0x482835ea666b2573 },
+    Multiplier{ hi: 0xdd95317f31c7fa1d, lo: 0x40405643d711d584 },
+    Multiplier{ hi: 0xb1442798f49ffb4a, lo: 0x99cd11cfdf41779d },
+    Multiplier{ hi: 0x8dd01fad907ffc3b, lo: 0xae3da7d97f6792e4 },
+    Multiplier{ hi: 0xe2e69915b3fff9f9, lo: 0x16c90c8f323f516d },
+    Multiplier{ hi: 0xb58547448ffffb2d, lo: 0xabd40a0c2832a78b },
+    Multiplier{ hi: 0x91376c36d99995be, lo: 0x23100809b9c21fa2 },
+    Multiplier{ hi: 0xe858ad248f5c22c9, lo: 0xd1b3400f8f9cff69 },
+    Multiplier{ hi: 0xb9e08a83a5e34f07, lo: 0xdaf5ccd93fb0cc54 },
+    Multiplier{ hi: 0x94b3a202eb1c3f39, lo: 0x7bf7d71432f3d6aa },
+    Multiplier{ hi: 0xedec366b11c6cb8f, lo: 0x2cbfbe86b7ec8aa9 },
+    Multiplier{ hi: 0xbe5691ef416bd60c, lo: 0x23cc986bc656d554 },
+    Multiplier{ hi: 0x9845418c345644d6, lo: 0x830a13896b78aaaa },
+    Multiplier{ hi: 0xf3a20279ed56d48a, lo: 0x6b43527578c11110 },
+    Multiplier{ hi: 0xc2e801fb244576d5, lo: 0x229c41f793cda740 },
+    Multiplier{ hi: 0x9becce62836ac577, lo: 0x4ee367f9430aec33 },
+    Multiplier{ hi: 0xf97ae3d0d2446f25, lo: 0x4b0573286b44ad1e },
+    Multiplier{ hi: 0xc795830d75038c1d, lo: 0xd59df5b9ef6a2418 },
+    Multiplier{ hi: 0x9faacf3df73609b1, lo: 0x77b191618c54e9ad },
+    Multiplier{ hi: 0xff77b1fcbebcdc4f, lo: 0x25e8e89c13bb0f7b },
+]);
+
+const MULT_INVERSES: common::MultInverses<Mant, 27> = common::MultInverses::new([
+    common::MultInverse{ multiplier: 0x0000000000000001, bound: 0xffffffffffffffff },
+    common::MultInverse{ multiplier: 0xcccccccccccccccd, bound: 0x3333333333333333 },
+    common::MultInverse{ multiplier: 0x8f5c28f5c28f5c29, bound: 0x0a3d70a3d70a3d70 },
+    common::MultInverse{ multiplier: 0x1cac083126e978d5, bound: 0x020c49ba5e353f7c },
+    common::MultInverse{ multiplier: 0xd288ce703afb7e91, bound: 0x0068db8bac710cb2 },
+    common::MultInverse{ multiplier: 0x5d4e8fb00bcbe61d, bound: 0x0014f8b588e368f0 },
+    common::MultInverse{ multiplier: 0x790fb65668c26139, bound: 0x000431bde82d7b63 },
+    common::MultInverse{ multiplier: 0xe5032477ae8d46a5, bound: 0x0000d6bf94d5e57a },
+    common::MultInverse{ multiplier: 0xc767074b22e90e21, bound: 0x00002af31dc46118 },
+    common::MultInverse{ multiplier: 0x8e47ce423a2e9c6d, bound: 0x0000089705f4136b },
+    common::MultInverse{ multiplier: 0x4fa7f60d3ed61f49, bound: 0x000001b7cdfd9d7b },
+    common::MultInverse{ multiplier: 0x0fee64690c913975, bound: 0x00000057f5ff85e5 },
+    common::MultInverse{ multiplier: 0x3662e0e1cf503eb1, bound: 0x000000119799812d },
+    common::MultInverse{ multiplier: 0xa47a2cf9f6433fbd, bound: 0x0000000384b84d09 },
+    common::MultInverse{ multiplier: 0x54186f653140a659, bound: 0x00000000b424dc35 },
+    common::MultInverse{ multiplier: 0x7738164770402145, bound: 0x0000000024075f3d },
+    common::MultInverse{ multiplier: 0xe4a4d1417cd9a041, bound: 0x000000000734aca5 },
+    common::MultInverse{ multiplier: 0xc75429d9e5c5200d, bound: 0x000000000170ef54 },
+    common::MultInverse{ multiplier: 0xc1773b91fac10669, bound: 0x000000000049c977 },
+    common::MultInverse{ multiplier: 0x26b172506559ce15, bound: 0x00000000000ec1e4 },
+    common::MultInverse{ multiplier: 0xd489e3a9addec2d1, bound: 0x000000000002f394 },
+    common::MultInverse{ multiplier: 0x90e860bb892c8d5d, bound: 0x000000000000971d },
+    common::MultInverse{ multiplier: 0x502e79bf1b6f4f79, bound: 0x0000000000001e39 },
+    common::MultInverse{ multiplier: 0xdcd618596be30fe5, bound: 0x000000000000060b },
+    common::MultInverse{ multiplier: 0x2c2ad1ab7bfa3661, bound: 0x0000000000000135 },
+    common::MultInverse{ multiplier: 0x08d55d224bfed7ad, bound: 0x000000000000003d },
+    common::MultInverse{ multiplier: 0x01c445d3a8cc9189, bound: 0x000000000000000c },
+]);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    mod binary {
+        use super::*;
+
+        /// Aux function, assert that `num` is decoded as `binary`, both via [Binary::new] and
+        /// [Binary::new_finite]; and repeat for `-num`.
+        fn assert_finite(num: f64, binary: Binary) {
+            assert!(num.is_finite());
+
+            assert_eq!(Binary::new(num.abs()), Some(binary));
+            assert_eq!(Binary::new_finite(num.abs()), binary);
+
+            assert_eq!(Binary::new(-num.abs()), Some(binary));
+            assert_eq!(Binary::new_finite(-num.abs()), binary);
+        }
+
+        #[test]
+        fn extremes() {
+            assert_finite(0.0, Binary{ exp: Binary::MIN_EXP, mant: 0 });
+            assert_finite(4.94065645841246544177e-324, Binary{ exp: -1022-52, mant: 1 });
+            assert_finite(f64::MIN_POSITIVE, Binary{ exp: -1022-52, mant: 1 << 52 });
+            assert_finite(f64::MAX, Binary{ exp: 1023-52, mant: (1 << 53) - 1 });
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(100_000))]
+            
+            #[test]
+            fn float_roundtrip(
+                float in f64::MIN .. f64::MAX,
+            ) {
+                let binary = Binary::new(float);
+                let binary_finite = Binary::new_finite(float);
+                assert_eq!(Some(binary_finite), binary);
+
+                let refloat = (2f64.powi(binary_finite.exp) * binary_finite.mant as f64).copysign(float);
+                assert_eq!(refloat, float);
+            }
+        }
+    }
+
+    mod decimal {
+        use super::*;
+
+        /// Aux function, assert that `num` is decoded as a `Result::Finite` with the given
+        /// `decimal`, both via [Result::new] and [Result::new_finite]; and repeat for `-num`.
+        fn assert_finite(num: f64, decimal: Decimal) {
+            assert!(num.is_finite());
+
+            assert_eq!(Result::new(num.abs()), Result::Finite { sign: true, decimal });
+            assert_eq!(Result::new_finite(num.abs()), Result::Finite { sign: true, decimal });
+
+            assert_eq!(Result::new(-num.abs()), Result::Finite { sign: false, decimal });
+            assert_eq!(Result::new_finite(-num.abs()), Result::Finite { sign: false, decimal });
+        }
+
+        #[test]
+        fn small() {
+            assert_finite(123.456, Decimal{ exp: -3, mant: 123456 });
+            assert_finite(0.1234, Decimal{ exp: -4, mant: 1234 });
+            assert_finite(core::f64::consts::PI, Decimal{ exp: -15, mant: 3_141592653589793 });
+            assert_finite(core::f64::consts::E, Decimal{ exp: -15, mant: 2_718281828459045 });
+            assert_finite(core::f64::consts::LN_2, Decimal{ exp: -16, mant: 0_6931471805599453 });
+        }
+
+        #[test]
+        fn small_integer() {
+            assert_finite(123456., Decimal{ exp: 0, mant: 123456 });
+            assert_finite(1., Decimal{ exp: 0, mant: 1 });
+            assert_finite(123000123000., Decimal{ exp: 3, mant: 123000123 });
+        }
+
+        #[test]
+        fn extremes() {
+            assert_finite(0.0, Decimal{ exp: 0, mant: 0 });
+            assert_finite(4.94065645841246544177e-324, Decimal{ exp: -324, mant: 5 });
+            assert_finite(f64::MIN_POSITIVE, Decimal{ exp: -308-16, mant: 22250738585072014 });
+            assert_finite(f64::MAX, Decimal{ exp: 308-16, mant: 17976931348623157 });
+        }
+
+        #[test]
+        fn specials() {
+            assert_eq!(Result::new(f64::NAN), Result::Nan);
+            assert_eq!(Result::new(-f64::NAN), Result::Nan);
+            assert_eq!(Result::new(f64::INFINITY), Result::Inf { sign: true });
+            assert_eq!(Result::new(f64::NEG_INFINITY), Result::Inf { sign: false });
+        }
+
+        const INT_BOUND: i64 = (1u64 << Binary::BITS_MANTISSA) as i64;
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(100_000))]
+            
+            #[test]
+            fn integer_roundtrip(
+                int in !INT_BOUND .. INT_BOUND,
+            ) {
+                let float = int as f64;
+                assert_eq!(
+                    Result::new(float),
+                    Result::Finite {
+                        sign: (int >= 0),
+                        decimal: Decimal{ exp: 0, mant: int.unsigned_abs() }.remove_trailing_zeros(),
+                    }
+                )
+            }
+            
+            #[test]
+            fn float_roundtrip(
+                float in f64::MIN .. f64::MAX,
+            ) {
+                let mut buf = crate::Buffer::new();
+                let str = buf.format_exp(float);
+                let refloat = str.parse().unwrap();
+                assert_eq!(float, refloat)
+            }
+        }
+    }
+
+    mod string {
+        use super::*;
+
+        /// Aux function, assert that `num` is serialised as `str`, both via `format` and
+        /// `format_finite`, repeat for `-num` being serialised as `-str`.
+        fn assert_exp_finite(num: f64, str: &str) {
+            assert!(num.is_finite());
+
+            let str_neg = 
+                if num.is_sign_positive() {
+                    "-".to_string() + str
+                } else {
+                    str[1..].to_string()
+                };
+
+            assert_eq!(crate::Buffer::new().format_exp(num), str);
+            assert_eq!(crate::Buffer::new().format_exp_finite(num), str);
+
+            assert_eq!(crate::Buffer::new().format_exp(-num), str_neg.as_str());
+            assert_eq!(crate::Buffer::new().format_exp_finite(-num), str_neg.as_str());
+        }
+
+        #[test]
+        fn small() {
+            assert_exp_finite(123.456, "1.23456e2");
+            assert_exp_finite(0.1234, "1.234e-1");
+            assert_exp_finite(core::f64::consts::PI, "3.141592653589793e0");
+            assert_exp_finite(core::f64::consts::E, "2.718281828459045e0");
+            assert_exp_finite(core::f64::consts::LN_2, "6.931471805599453e-1");
+        }
+
+        #[test]
+        fn small_integer() {
+            assert_exp_finite(123456., "1.23456e5");
+            assert_exp_finite(1., "1.0");
+            assert_exp_finite(123000123000., "1.23000123e11");
+        }
+
+        #[test]
+        fn extremes() {
+            assert_exp_finite(0.0, "0.0");
+            assert_exp_finite(4.94065645841246544177e-324, "5e-324");
+            assert_exp_finite(f64::MIN_POSITIVE, "2.2250738585072014e-308" );
+            assert_exp_finite(f64::MAX, "1.7976931348623157e308" );
+        }
+
+        #[test]
+        fn specials() {
+            assert_eq!(crate::Buffer::new().format_exp(f64::NAN), "NaN");
+            assert_eq!(crate::Buffer::new().format_exp(-f64::NAN), "NaN");
+            assert_eq!(crate::Buffer::new().format_exp(f64::INFINITY), "inf");
+            assert_eq!(crate::Buffer::new().format_exp(f64::NEG_INFINITY), "-inf");
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(100_000))]
+            
+            /*#[test]
+            fn ryu(
+                float in f64::MIN .. f64::MAX,
+            ) {
+                assert_eq!(
+                    crate::Buffer::new().format(float),
+                    ryu::Buffer::new().format(float),
+                )
+            }*/
+        }
+    }
+}
