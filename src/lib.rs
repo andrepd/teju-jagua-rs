@@ -44,10 +44,12 @@ impl<F: Float> Buffer<F> {
     /// If `num` is known to be finite, you may get better performance by calling the
     /// [Self::format_exp_finite] method instead of format to avoid the checks for special cases.
     pub fn format_exp(&mut self, num: F) -> &str {
-        let n = unsafe { num.format_exp(F::buffer_as_ptr(&mut self.bytes)) };
-        let slice = unsafe { core::slice::from_raw_parts(F::buffer_as_ptr(&mut self.bytes), n) };
-        debug_assert!(n <= F::BUFFER_LEN);
-        unsafe { core::str::from_utf8_unchecked(slice) }
+        match num.classify() {
+            teju::FloatType::Finite => self.format_exp_finite(num),
+            teju::FloatType::PosInf => "inf",
+            teju::FloatType::NegInf => "-inf",
+            teju::FloatType::Nan => "NaN",
+        }
     }
 
     /// Print a floating point `num` into this buffer in scientific notation, and return a

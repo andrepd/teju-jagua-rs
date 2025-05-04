@@ -96,12 +96,3 @@ pub unsafe fn write_char_to(char: u8, buf: &mut *mut u8) -> usize {
     *buf = unsafe { buf.add(1) };
     1
 }
-
-/// The result of running Tejú Jaguá on a float value.
-#[derive(Debug)]
-#[derive(PartialEq, Eq)]
-pub enum Result<Decimal> {
-    Finite {sign: bool, decimal: Decimal},
-    Nan,
-    Inf {sign: bool},
-}

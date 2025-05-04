@@ -1,11 +1,11 @@
 use crate::teju::common;
-use common::{Exp, Result, /*Signed*/};
+use common::Exp;
 
 /// The mantissa is represented by an unsigned integer the same size as the float (in this case,
 /// u64 for f64).
 pub type Mant = u64;
 
-/// The **absolute value** of an `f64` decoded into exponent and mantissa.
+/// The **absolute value** of a finite `f64` decoded into exponent and mantissa.
 #[derive(Debug)]
 #[derive(Clone, Copy)]
 #[derive(PartialEq, Eq)]
@@ -14,13 +14,21 @@ pub struct Binary {
     mant: Mant,
 }
 
-/// A decimal representation of the **absolute value** of an `f64`.
+/// A decimal representation of the **absolute value** of a finite `f64`.
 #[derive(Debug)]
 #[derive(Clone, Copy)]
 #[derive(PartialEq, Eq)]
 pub struct Decimal {
     exp: Exp,
     mant: Mant,  // TODO make signed?
+}
+
+/// The result of running Tejú Jaguá on a finite `f64`.
+#[derive(Debug)]
+#[derive(PartialEq, Eq)]
+pub struct Result {
+    sign: bool,
+    decimal: Decimal,
 }
 
 // TODO strong typing to keep track of decimal/binary exponent/mantissa?
@@ -68,17 +76,12 @@ impl Binary {
     /// Decomposes a **finite** `f64` into the binary exponent and mantissa of its absolute
     /// value, i.e. such that `|num| = mant * 2^exp`.
     ///
-    /// If `num` is infinite or NaN, returns `None`.
+    /// If `num` is infinite or NaN, returns an unspecified value; this is not checked except in
+    /// debug assertions.
     #[inline]
-    pub const fn new(num: f64) -> Option<Self> {
-        if !num.is_finite() { return None }
-        Some(Self::new_finite(num))
-    }
+    pub const fn new(num: f64) -> Self {
+        debug_assert!(num.is_finite());
 
-    /// As [Self::new], but does not check that `f64` is finite. If it is (`±∞`, or `NaN`), then
-    /// the return value is unspecified.
-    #[inline]
-    pub const fn new_finite(num: f64) -> Self {
         let num = num.abs();
         let mut mant = lsb(num.to_bits(), Self::BITS_MANTISSA - 1);
         let mut exp = (num.to_bits() >> (Self::BITS_MANTISSA - 1)) as Exp;
@@ -268,75 +271,43 @@ impl Decimal {
     }*/
 }
 
-impl Result<Decimal> {
+impl Result {
     #[inline]
     pub fn new(num: f64) -> Self {
-        let sign = num.is_sign_positive();
-        match Binary::new(num) {
-            Some(binary) => Result::Finite{ sign, decimal: binary.teju_jagua() },
-            None => if num.is_nan() {
-                Result::Nan
-            } else {
-                debug_assert!(num.is_infinite());
-                Result::Inf { sign }
-            }
-        }
-    }
-
-    #[inline]
-    pub fn new_finite(num: f64) -> Self {
         debug_assert!(num.is_finite());
-        let sign = num.is_sign_positive();
-        Result::Finite{ sign, decimal: Binary::new_finite(num).teju_jagua() }
-    }
-
-    /// Write `num` onto slice starting at `buf`, returning the number of bytes written. If `buf` is
-    /// not big enough to format `num` into, this is *undefined behaviour*.
-    pub unsafe fn format_exp(self, mut buf: *mut u8) -> usize {
-        match self {
-            Result::Finite { sign, decimal } => unsafe { Self::format_inner(sign, decimal, buf) } ,
-            Result::Nan => unsafe { common::write_to(b"NaN", &mut buf) },
-            Result::Inf { sign } => if sign {
-                unsafe { common::write_to(b"inf", &mut buf) }
-            } else {
-                unsafe { common::write_to(b"-inf", &mut buf) }
-            },
-        }
-    }
-
-    pub unsafe fn format_exp_finite(self, buf: *mut u8) -> usize {
-        match self {
-            Result::Finite { sign, decimal } => unsafe { Self::format_inner(sign, decimal, buf) },
-            _ => unsafe { core::hint::unreachable_unchecked() }
+        Result{
+            sign: num.is_sign_positive(),
+            decimal: Binary::new(num).teju_jagua(),
         }
     }
 
     #[inline]
-    unsafe fn format_inner(sign: bool, mut decimal: Decimal, mut buf: *mut u8) -> usize {
+    pub unsafe fn format_exp(mut self, mut buf: *mut u8) -> usize {
         let buf_orig = buf;
         unsafe {
-            if !sign {
+            if !self.sign {
                 let _ = common::write_char_to(b'-', &mut buf);
             }
 
             let mut itoa_buf = itoa::Buffer::new();
 
-            let mant = itoa_buf.format(decimal.mant);
+            let mant = itoa_buf.format(self.decimal.mant);
             common::write_char_to(*mant.as_bytes().get_unchecked(0), &mut buf);
+
             let mant_len_after_point = mant.len() - 1;
             if mant_len_after_point == 0 {
-                if decimal.exp == 0 {
+                if self.decimal.exp == 0 {
                     common::write_to(b".0", &mut buf);
                 } else {
                     common::write_char_to(b'e', &mut buf);
-                    common::write_to(itoa_buf.format(decimal.exp).as_bytes(), &mut buf);
+                    common::write_to(itoa_buf.format(self.decimal.exp).as_bytes(), &mut buf);
                 }
             } else {
-                decimal.exp += mant_len_after_point as i32;
+                self.decimal.exp += mant_len_after_point as i32;
                 common::write_char_to(b'.', &mut buf);
                 common::write_to(mant.get_unchecked(1..).as_bytes(), &mut buf);
                 common::write_char_to(b'e', &mut buf);
-                common::write_to(itoa_buf.format(decimal.exp).as_bytes(), &mut buf);
+                common::write_to(itoa_buf.format(self.decimal.exp).as_bytes(), &mut buf);
             }
 
             buf.offset_from(buf_orig) as usize
@@ -344,7 +315,7 @@ impl Result<Decimal> {
     }
 
     #[inline]
-    unsafe fn format_inner_exp_fixed(sign: bool, decimal: Decimal, mut buf: *mut u8) -> usize {
+    unsafe fn format_exp_fixed(sign: bool, decimal: Decimal, mut buf: *mut u8) -> usize {
         let buf_orig = buf;
         unsafe {
             if sign {
@@ -1023,16 +994,11 @@ mod tests {
     mod binary {
         use super::*;
 
-        /// Aux function, assert that `num` is decoded as `binary`, both via [Binary::new] and
-        /// [Binary::new_finite]; and repeat for `-num`.
+        /// Aux function, assert that `num` is decoded as `binary`; repeat for `-num`.
         fn assert_finite(num: f64, binary: Binary) {
             assert!(num.is_finite());
-
-            assert_eq!(Binary::new(num.abs()), Some(binary));
-            assert_eq!(Binary::new_finite(num.abs()), binary);
-
-            assert_eq!(Binary::new(-num.abs()), Some(binary));
-            assert_eq!(Binary::new_finite(-num.abs()), binary);
+            assert_eq!(Binary::new(num.abs()), binary);
+            assert_eq!(Binary::new(-num.abs()), binary);
         }
 
         #[test]
@@ -1051,10 +1017,7 @@ mod tests {
                 float in f64::MIN .. f64::MAX,
             ) {
                 let binary = Binary::new(float);
-                let binary_finite = Binary::new_finite(float);
-                assert_eq!(Some(binary_finite), binary);
-
-                let refloat = (2f64.powi(binary_finite.exp) * binary_finite.mant as f64).copysign(float);
+                let refloat = (2f64.powi(binary.exp) * binary.mant as f64).copysign(float);
                 assert_eq!(refloat, float);
             }
         }
@@ -1063,16 +1026,12 @@ mod tests {
     mod decimal {
         use super::*;
 
-        /// Aux function, assert that `num` is decoded as a `Result::Finite` with the given
-        /// `decimal`, both via [Result::new] and [Result::new_finite]; and repeat for `-num`.
+        /// Aux function, assert that `num` is decoded as a `Result` with the given `decimal`;
+        /// repeat for `-num` (with the opposite sign).
         fn assert_finite(num: f64, decimal: Decimal) {
             assert!(num.is_finite());
-
-            assert_eq!(Result::new(num.abs()), Result::Finite { sign: true, decimal });
-            assert_eq!(Result::new_finite(num.abs()), Result::Finite { sign: true, decimal });
-
-            assert_eq!(Result::new(-num.abs()), Result::Finite { sign: false, decimal });
-            assert_eq!(Result::new_finite(-num.abs()), Result::Finite { sign: false, decimal });
+            assert_eq!(Result::new(num.abs()), Result { sign: true, decimal });
+            assert_eq!(Result::new(-num.abs()), Result { sign: false, decimal });
         }
 
         #[test]
@@ -1099,14 +1058,6 @@ mod tests {
             assert_finite(f64::MAX, Decimal{ exp: 308-16, mant: 17976931348623157 });
         }
 
-        #[test]
-        fn specials() {
-            assert_eq!(Result::new(f64::NAN), Result::Nan);
-            assert_eq!(Result::new(-f64::NAN), Result::Nan);
-            assert_eq!(Result::new(f64::INFINITY), Result::Inf { sign: true });
-            assert_eq!(Result::new(f64::NEG_INFINITY), Result::Inf { sign: false });
-        }
-
         const INT_BOUND: i64 = (1u64 << Binary::BITS_MANTISSA) as i64;
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(100_000))]
@@ -1118,7 +1069,7 @@ mod tests {
                 let float = int as f64;
                 assert_eq!(
                     Result::new(float),
-                    Result::Finite {
+                    Result{
                         sign: (int >= 0),
                         decimal: Decimal{ exp: 0, mant: int.unsigned_abs() }.remove_trailing_zeros(),
                     }
@@ -1141,7 +1092,7 @@ mod tests {
         use super::*;
 
         /// Aux function, assert that `num` is serialised as `str`, both via `format` and
-        /// `format_finite`, repeat for `-num` being serialised as `-str`.
+        /// `format_finite`; repeat for `-num` being serialised as `-str`.
         fn assert_exp_finite(num: f64, str: &str) {
             assert!(num.is_finite());
 
