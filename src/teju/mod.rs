@@ -1,5 +1,6 @@
 mod common;
 mod mk_impl;
+mod lut;
 
 /// A floating point type which [teju](crate) can serialise into a string.
 ///
