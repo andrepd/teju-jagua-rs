@@ -14,7 +14,7 @@ pub struct Binary {
     mant: Mant,
 }
 
-/// A decimal representation of the absolute value of an `f64`.
+/// A decimal representation of the **absolute value** of an `f64`.
 #[derive(Debug)]
 #[derive(Clone, Copy)]
 #[derive(PartialEq, Eq)]
@@ -31,21 +31,19 @@ type Multiplier = common::Multiplier<Mant>;
 /// Calculates the result of `a * mult / 2^(2N)` without overflow, `N` is the number of bits of
 /// `a`, `mult.hi`, `mult.lo`.
 const fn multiword_multiply_shift(a: Mant, mult: &Multiplier) -> Mant {
-    const N: u32 = 64;
     let result_hi = mult.hi as u128 * a as u128;
     let result_lo = mult.lo as u128 * a as u128;
-    let result = (result_hi + (result_lo >> N)) >> N;
+    let result = (result_hi + (result_lo >> Mant::BITS)) >> Mant::BITS;
     result as Mant
 }
 
 /// Calculates the result of `multiword_multiply_shift(2^k, mult)` without overflow,
 const fn multiword_multiply_shift_pow2(k: u32, mult: &Multiplier) -> Mant {
-    const N: u32 = 64;
-    let s: Exp = k as Exp - (2 * N - N) as Exp;
+    let s: Exp = k as Exp - Mant::BITS as Exp;
     if s <= 0 {
         mult.hi >> (-s as u32)
     } else {
-        (mult.hi << s as u32) | mult.lo  >> (-(k as Exp) as u32)
+        (mult.hi << s as u32) | mult.lo >> (-(k as Exp) as u32)
     }
 }
 
