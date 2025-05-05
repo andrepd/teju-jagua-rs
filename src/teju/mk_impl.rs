@@ -1,17 +1,17 @@
 use crate::teju::common;
 use crate::teju::lut::f64::*;
-use common::Exp;
 
 /// The mantissa is represented by an unsigned integer the same size as the float (in this case,
 /// u64 for f64).
 pub type Mant = u64;
+pub type Exp = common::Exp;
 
 /// The **absolute value** of a finite `f64` decoded into exponent and mantissa.
 #[derive(Debug)]
 #[derive(Clone, Copy)]
 #[derive(PartialEq, Eq)]
 pub struct Binary {
-    exp: Exp,  // TODO enforce bounds on exp 
+    exp: Exp,
     mant: Mant,
 }
 
@@ -21,7 +21,7 @@ pub struct Binary {
 #[derive(PartialEq, Eq)]
 pub struct Decimal {
     exp: Exp,
-    mant: Mant,  // TODO make signed?
+    mant: Mant,
 }
 
 /// The result of running Tejú Jaguá on a finite `f64`.
@@ -34,20 +34,19 @@ pub struct Result {
 
 // TODO strong typing to keep track of decimal/binary exponent/mantissa?
 
-// type Multipliers = common::Multipliers<Mant>;
-type Multiplier = common::Multiplier<Mant>;
-
-/// Calculates the result of `a * mult / 2^(2N)` without overflow, `N` is the number of bits of
-/// `a`, `mult.hi`, `mult.lo`.
-const fn multiword_multiply_shift(a: Mant, mult: &Multiplier) -> Mant {
+/// Calculates the result of `a * mult / 2^(2N)` without overflow, where `N` is the number of bits
+/// of `a`, `mult.hi`, `mult.lo`.
+#[inline]
+const fn multiword_multiply_shift(a: Mant, mult: &common::Multiplier<Mant>) -> Mant {
     let result_hi = mult.hi as u128 * a as u128;
     let result_lo = mult.lo as u128 * a as u128;
     let result = (result_hi + (result_lo >> Mant::BITS)) >> Mant::BITS;
     result as Mant
 }
 
-/// Calculates the result of `multiword_multiply_shift(2^k, mult)` without overflow,
-const fn multiword_multiply_shift_pow2(k: u32, mult: &Multiplier) -> Mant {
+/// Calculates the result of `multiword_multiply_shift(2^k, mult)` without overflow.
+#[inline]
+const fn multiword_multiply_shift_pow2(k: u32, mult: &common::Multiplier<Mant>) -> Mant {
     let s: Exp = k as Exp - Mant::BITS as Exp;
     if s <= 0 {
         mult.hi >> (-s as u32)
@@ -70,9 +69,18 @@ pub const fn is_even(n: Mant) -> bool {
 }
 
 impl Binary {
+    /// Number of bits in precision of the mantissa, including the implicit `1.`.
     const BITS_MANTISSA: u32 = 53;
 
+    /// Number of bits of the mantissa that are actually stored.
+    const BITS_MANTISSA_EXPLICIT: u32 = Self::BITS_MANTISSA - 1;
+
+    /// The exponent bias, including the implicit factor of `2 ^ Self::BITS_MANTISSA` from treating
+    /// the mantissa as a fixed-point decimal.
     const MIN_EXP: Exp = f64::MIN_EXP - Self::BITS_MANTISSA as i32;
+
+    /// 1 + the maximum mantissa value storable in a float.
+    const MAX_MANT: Mant = 1 << Self::BITS_MANTISSA_EXPLICIT;
 
     /// Decomposes a **finite** `f64` into the binary exponent and mantissa of its absolute
     /// value, i.e. such that `|num| = mant * 2^exp`.
@@ -84,12 +92,12 @@ impl Binary {
         debug_assert!(num.is_finite());
 
         let num = num.abs();
-        let mut mant = lsb(num.to_bits(), Self::BITS_MANTISSA - 1);
-        let mut exp = (num.to_bits() >> (Self::BITS_MANTISSA - 1)) as Exp;
+        let mut mant = lsb(num.to_bits(), Self::BITS_MANTISSA_EXPLICIT);
+        let mut exp = (num.to_bits() >> Self::BITS_MANTISSA_EXPLICIT) as Exp;
 
         if exp != 0 {
             exp -= 1;
-            mant |= 1 << (Self::BITS_MANTISSA - 1);
+            mant |= 1 << Self::BITS_MANTISSA_EXPLICIT;
         }
 
         Binary{
@@ -98,26 +106,31 @@ impl Binary {
         }
     }
 
-    /// Returns the largest exponent `f` such that `10^f ≤ 2^e`, i.e. the integer part of
-    /// `log_10(2^e)`.
+    /// Returns the largest exponent `f` such that `10^f ≤ 2^self.exp`, i.e. the integer part of
+    /// `log10(2^self.exp)`.
     #[inline]
     const fn exp_log10_pow2(&self) -> Exp {
         common::exp_log10_pow2(self.exp)
     }
 
-    /// Returns the largest exponent `f` such that `10^f ≤ 2^e`, i.e. the integer part of
-    /// `log_10(2^e)`.
+    /// Returns `self.exp - e_0`, where `e_0` is the smallest exponent such that the integer part
+    /// of `log10(2^e_0)` is equal to the integer part of `log10(2^self.exp)`.
     #[inline]
     const fn exp_log10_pow2_residual(&self) -> u32 {
         common::exp_log10_pow2_residual(self.exp)
     }
 
-    /// Checks whether `self.mant
+    /// Checks whether `self.mant` is a multiple of `2 ^ self.exp`.
+    ///
+    /// If not `0 ≤ self.exp < f64::BITS`, this returns an unspecified value.
     #[inline]
     const fn is_multiple_of_pow2(&self) -> bool {
-        (self.mant >> self.exp) << self.exp == self.mant
+        /*(self.mant >> self.exp) << self.exp == self.mant*/
+        lsb(self.mant, self.exp as u32) == 0
     }
 
+    /// Checks whether `self` is a "small integer", i.e. in the range of the contiguous integers
+    /// representable by an `f64` without rounding.
     #[inline]
     const fn is_small_integer(&self) -> bool {
         // `self.exp` has to be in the interval [0; BITS_MANTISSA[, and `self` must be a clean
@@ -138,11 +151,8 @@ impl Binary {
         // SAFETY: exp_floor is in bounds
         let mult = unsafe { MULTIPLIERS.get(exp_floor) };
 
-        // TODO const
-        let M_0: Mant = 1 << (Self::BITS_MANTISSA - 1);
-
-        // Case 1: 
-        if self.mant != M_0 || self.exp == Self::MIN_EXP {
+        // Case 1: centered
+        if self.mant != Self::MAX_MANT || self.exp == Self::MIN_EXP {
             let mant_a = (2 * self.mant - 1) << exp_residual;
             let mant_b = (2 * self.mant + 1) << exp_residual;
             let a = multiword_multiply_shift(mant_a, mult);
@@ -171,11 +181,11 @@ impl Binary {
             return Decimal{exp: exp_floor, mant: c + (round_up as Mant)}
         }
 
-        // Case 2: 
+        // Case 2: uncentered
         else {
-            // self.mant == M_0
-            let mant_a = (4 * M_0 - 1) << exp_residual;
-            let mant_b = (2 * M_0 + 1) << exp_residual;
+            // self.mant == Self::MAX_MANT
+            let mant_a = (4 * Self::MAX_MANT - 1) << exp_residual;
+            let mant_b = (2 * Self::MAX_MANT + 1) << exp_residual;
             let a = multiword_multiply_shift(mant_a, mult) / 2;
             let b = multiword_multiply_shift(mant_b, mult);
             let decimal_a = Decimal{ exp: exp_floor, mant: mant_a };
@@ -185,10 +195,10 @@ impl Binary {
                 let q = b / 10;
                 let s = q * 10;
                 if a < s {
-                    if s < b || is_even(M_0) || !decimal_b.is_tie_uncentered() {
+                    if s < b || is_even(Self::MAX_MANT) || !decimal_b.is_tie_uncentered() {
                         return Decimal{exp: exp_floor + 1, mant: q }.remove_trailing_zeros()
                     }
-                } else if s == a && is_even(M_0) && decimal_a.is_tie_uncentered() {
+                } else if s == a && is_even(Self::MAX_MANT) && decimal_a.is_tie_uncentered() {
                     return Decimal{exp: exp_floor + 1, mant: q }.remove_trailing_zeros()
                 } else if (a + b) % 2 == 1 {
                     return Decimal{exp: exp_floor, mant: (a + b) / 2 + 1}
@@ -206,7 +216,7 @@ impl Binary {
             } else if decimal_a.is_tie_uncentered() {
                 return Decimal{exp: exp_floor, mant: a}.remove_trailing_zeros()
             } else {
-                let mant_c = (40 * M_0) << exp_residual;
+                let mant_c = (40 * Self::MAX_MANT) << exp_residual;
                 let c2 = multiword_multiply_shift(mant_c, mult);
                 let c = c2 / 2;
 
@@ -264,12 +274,6 @@ impl Decimal {
             self.mant = q;
         }
     }
-
-    /*/// The entry point for the algorithm
-    fn from(num: f64) -> (bool, Self) {
-        let sign = num.is_sign_positive();
-        let decimal
-    }*/
 }
 
 impl Result {
