@@ -1,4 +1,5 @@
 mod common;
+mod fmt;
 mod mk_impl;
 mod lut;
 

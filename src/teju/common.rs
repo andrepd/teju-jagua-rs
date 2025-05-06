@@ -80,19 +80,3 @@ impl<T, const N: usize> MultInverses<T, N> {
         unsafe { self.0.get_unchecked(exp_floor as usize) }
     }
 }
-
-//
-
-#[inline]
-pub unsafe fn write_to(str: &[u8], buf: &mut *mut u8) -> usize {
-    unsafe { buf.copy_from(str.as_ptr(), str.len()) }
-    *buf = unsafe { buf.add(str.len()) };
-    str.len()
-}
-
-#[inline]
-pub unsafe fn write_char_to(char: u8, buf: &mut *mut u8) -> usize {
-    unsafe { buf.write(char) };
-    *buf = unsafe { buf.add(1) };
-    1
-}

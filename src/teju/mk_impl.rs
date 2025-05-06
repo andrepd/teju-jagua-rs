@@ -1,4 +1,4 @@
-use crate::teju::common;
+use crate::teju::{common, fmt};
 use crate::teju::lut::f64::*;
 
 /// The mantissa is represented by an unsigned integer the same size as the float (in this case,
@@ -287,56 +287,49 @@ impl Result {
     }
 
     #[inline]
-    pub unsafe fn format_exp(mut self, mut buf: *mut u8) -> usize {
+    pub unsafe fn format_exp(self, mut buf: *mut u8) -> usize {
         let buf_orig = buf;
         unsafe {
-            if !self.sign {
-                let _ = common::write_char_to(b'-', &mut buf);
-            }
+            buf.write(b'-');
+            buf = buf.add(!self.sign as usize);
 
-            let mut itoa_buf = itoa::Buffer::new();
+            *buf.add(2) = b'0';
+            /*let mant_len = fmt::print_u64_mantissa(self.decimal.mant, buf.add(1));*/
+            let mant_len = {
+                let len = fmt::len_u64(self.decimal.mant);
+                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf.add(1), len)
+            };
 
-            let mant = itoa_buf.format(self.decimal.mant);
-            common::write_char_to(*mant.as_bytes().get_unchecked(0), &mut buf);
+            *buf = *buf.add(1);
+            *buf.add(1) = b'.';
+            let mant_len_after_point = mant_len - 1;
+            buf = buf.add(mant_len + ((mant_len_after_point > 0) as usize));
 
-            let mant_len_after_point = mant.len() - 1;
-            if mant_len_after_point == 0 {
-                if self.decimal.exp == 0 {
-                    common::write_to(b".0", &mut buf);
-                } else {
-                    common::write_char_to(b'e', &mut buf);
-                    common::write_to(itoa_buf.format(self.decimal.exp).as_bytes(), &mut buf);
-                }
-            } else {
-                self.decimal.exp += mant_len_after_point as i32;
-                common::write_char_to(b'.', &mut buf);
-                common::write_to(mant.get_unchecked(1..).as_bytes(), &mut buf);
-                common::write_char_to(b'e', &mut buf);
-                common::write_to(itoa_buf.format(self.decimal.exp).as_bytes(), &mut buf);
-            }
+            *buf = b'e';
+            let exp_len = fmt::print_i32_exp(self.decimal.exp + mant_len_after_point as i32, buf.add(1));
 
-            buf.offset_from(buf_orig) as usize
+            buf.offset_from(buf_orig) as usize + 1 + exp_len
         }
     }
 
-    #[inline]
+    /*#[inline]
     unsafe fn format_exp_fixed(sign: bool, decimal: Decimal, mut buf: *mut u8) -> usize {
         let buf_orig = buf;
         unsafe {
             if sign {
-                common::write_char_to(b'+', &mut buf);
+                fmt::write_char_to(b'+', &mut buf);
             } else {
-                common::write_char_to(b'-', &mut buf);
+                fmt::write_char_to(b'-', &mut buf);
             }
 
             let mut itoa_buf = itoa::Buffer::new();
-            common::write_to(itoa_buf.format(decimal.mant).as_bytes(), &mut buf);
-            common::write_char_to(b'e', &mut buf);
-            common::write_to(itoa_buf.format(decimal.exp).as_bytes(), &mut buf);
+            fmt::write_to(itoa_buf.format(decimal.mant).as_bytes(), &mut buf);
+            fmt::write_char_to(b'e', &mut buf);
+            fmt::write_to(itoa_buf.format(decimal.exp).as_bytes(), &mut buf);
 
             buf.offset_from(buf_orig) as usize
         }
-    }
+    }*/
 }
 
 #[cfg(test)]

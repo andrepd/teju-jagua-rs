@@ -8,9 +8,6 @@ keywords = ["float", "ieee-754"]
 categories = ["algorithms", "no-std"]
 license = "LGPL-3.0"
 
-[dependencies]
-itoa = "1.0.15"
-
 [dev-dependencies]
 proptest = "1.6.0"
 ryu = "1.0.20"
