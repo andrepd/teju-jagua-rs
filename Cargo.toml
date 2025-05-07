@@ -11,3 +11,12 @@ license = "LGPL-3.0"
 [dev-dependencies]
 proptest = "1.6.0"
 ryu = "1.0.20"
+criterion = "0.5.1"
+
+[[bench]]
+name = "bench"
+harness = false
+features = ["bench"]
+
+[features]
+bench = []
