@@ -35,6 +35,38 @@ impl<F: Float> Buffer<F> {
         Buffer { bytes: F::new_buffer() }
     }
 
+    /// Print a floating point `num` into this buffer, and return a reference to its string
+    /// representation within the buffer. The number is formatted as a decimal if it fits in
+    /// a "small" number of characters, or in scientific notation otherwise.
+    ///
+    /// This function formats NaN as the string `"NaN"`, positive infinity as `"inf"`, and negative
+    /// infinity as `"-inf"`, to match [std::fmt].
+    ///
+    /// If `num` is known to be finite, you may get better performance by calling the
+    /// [Self::format_exp_finite] method instead of format to avoid the checks for special cases.
+    pub fn format(&mut self, num: F) -> &str {
+        match num.classify() {
+            teju::FloatType::Finite => self.format_finite(num),
+            teju::FloatType::PosInf => "inf",
+            teju::FloatType::NegInf => "-inf",
+            teju::FloatType::Nan => "NaN",
+        }
+    }
+
+    /// Print a floating point `num` into this buffer, and return a reference to its string
+    /// representation within the buffer, **provided that `num.is_finite()`**. The number is
+    /// formatted as a decimal if it fits in a "small" number of characters, or in scientific
+    /// notation otherwise.
+    ///
+    /// This function **does not** check that `num` is indeed finite, for performance reasons; in
+    /// this case it will print an unspecified (but valid) string.
+    pub fn format_finite(&mut self, num: F) -> &str {
+        let n = unsafe { num.format_general_finite(F::buffer_as_ptr(&mut self.bytes)) };
+        let slice = unsafe { core::slice::from_raw_parts(F::buffer_as_ptr(&mut self.bytes), n) };
+        debug_assert!(n <= F::BUFFER_LEN);
+        unsafe { core::str::from_utf8_unchecked(slice) }
+    }
+
     /// Print a floating point `num` into this buffer in scientific notation, and return a
     /// reference to its string representation within the buffer.
     /// 

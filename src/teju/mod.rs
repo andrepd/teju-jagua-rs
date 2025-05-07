@@ -25,17 +25,18 @@ pub trait Sealed
     fn buffer_as_ptr(buf: &mut Self::Buffer) -> *mut u8;
 
     fn classify(&self) -> FloatType;
+    unsafe fn format_general_finite(self, buf: *mut u8) -> usize;
     unsafe fn format_exp_finite(self, buf: *mut u8) -> usize;
 }
 
 impl Sealed for f64 {
-    type Buffer = [core::mem::MaybeUninit<u8>; 24];
+    const BUFFER_LEN: usize = 32;
+
+    type Buffer = [core::mem::MaybeUninit<u8>; Self::BUFFER_LEN];
 
     fn new_buffer() -> Self::Buffer {
-        [core::mem::MaybeUninit::uninit(); 24]
+        [core::mem::MaybeUninit::uninit(); Self::BUFFER_LEN]
     }
-
-    const BUFFER_LEN: usize = 24;
 
     fn buffer_as_ptr(buf: &mut Self::Buffer) -> *mut u8 {
         buf.as_mut_ptr() as *mut u8
@@ -50,6 +51,11 @@ impl Sealed for f64 {
         } else {
             FloatType::Nan
         }
+    }
+
+    unsafe fn format_general_finite(self, buf: *mut u8) -> usize {
+        let result = mk_impl::Result::new(self);
+        unsafe { result.format_general(buf) }
     }
 
     unsafe fn format_exp_finite(self, buf: *mut u8) -> usize {
