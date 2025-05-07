@@ -29,6 +29,14 @@ pub enum Format {
     Scientific,
 }*/
 
+const POS_INF: &str = "inf";
+const NEG_INF: &str = "-inf";
+const NAN: &str = "NaN";
+const POS_ZERO: &str = "0.0";
+const NEG_ZERO: &str = "-0.0";
+const POS_ZERO_EXP: &str = "0e0";
+const NEG_ZERO_EXP: &str = "-0e0";
+
 impl<F: Float> Buffer<F> {
     /// This is a cheap operation; you don't need to worry about reusing buffers for efficiency.
     pub fn new() -> Self {
@@ -47,9 +55,9 @@ impl<F: Float> Buffer<F> {
     pub fn format(&mut self, num: F) -> &str {
         match num.classify() {
             teju::FloatType::Finite => self.format_finite(num),
-            teju::FloatType::PosInf => "inf",
-            teju::FloatType::NegInf => "-inf",
-            teju::FloatType::Nan => "NaN",
+            teju::FloatType::PosInf => POS_INF,
+            teju::FloatType::NegInf => NEG_INF,
+            teju::FloatType::Nan => NAN,
         }
     }
 
@@ -61,7 +69,12 @@ impl<F: Float> Buffer<F> {
     /// This function **does not** check that `num` is indeed finite, for performance reasons; in
     /// this case it will print an unspecified (but valid) string.
     pub fn format_finite(&mut self, num: F) -> &str {
-        let n = unsafe { num.format_general_finite(F::buffer_as_ptr(&mut self.bytes)) };
+        match num.classify_finite() {
+            teju::FiniteFloatType::PosZero => return POS_ZERO,
+            teju::FiniteFloatType::NegZero => return NEG_ZERO,
+            teju::FiniteFloatType::Nonzero => (),
+        }
+        let n = unsafe { num.format_general_finite_nonzero(F::buffer_as_ptr(&mut self.bytes)) };
         let slice = unsafe { core::slice::from_raw_parts(F::buffer_as_ptr(&mut self.bytes), n) };
         debug_assert!(n <= F::BUFFER_LEN);
         unsafe { core::str::from_utf8_unchecked(slice) }
@@ -78,9 +91,9 @@ impl<F: Float> Buffer<F> {
     pub fn format_exp(&mut self, num: F) -> &str {
         match num.classify() {
             teju::FloatType::Finite => self.format_exp_finite(num),
-            teju::FloatType::PosInf => "inf",
-            teju::FloatType::NegInf => "-inf",
-            teju::FloatType::Nan => "NaN",
+            teju::FloatType::PosInf => POS_INF,
+            teju::FloatType::NegInf => NEG_INF,
+            teju::FloatType::Nan => NAN,
         }
     }
 
@@ -90,10 +103,14 @@ impl<F: Float> Buffer<F> {
     /// This function **does not** check that `num` is indeed finite, for performance reasons; in
     /// this case it will print an unspecified (but valid) string.
     pub fn format_exp_finite(&mut self, num: F) -> &str {
-        let n = unsafe { num.format_exp_finite(F::buffer_as_ptr(&mut self.bytes)) };
+        match num.classify_finite() {
+            teju::FiniteFloatType::PosZero => return POS_ZERO_EXP,
+            teju::FiniteFloatType::NegZero => return NEG_ZERO_EXP,
+            teju::FiniteFloatType::Nonzero => (),
+        }
+        let n = unsafe { num.format_exp_finite_nonzero(F::buffer_as_ptr(&mut self.bytes)) };
         let slice = unsafe { core::slice::from_raw_parts(F::buffer_as_ptr(&mut self.bytes), n) };
         debug_assert!(n <= F::BUFFER_LEN);
         unsafe { core::str::from_utf8_unchecked(slice) }
     }
 }
-

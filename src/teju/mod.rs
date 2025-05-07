@@ -17,6 +17,13 @@ pub enum FloatType {
     Nan,
 }
 
+#[derive(Debug)]
+pub enum FiniteFloatType {
+    Nonzero,
+    PosZero,
+    NegZero,
+}
+
 pub trait Sealed
 {
     type Buffer;
@@ -25,8 +32,10 @@ pub trait Sealed
     fn buffer_as_ptr(buf: &mut Self::Buffer) -> *mut u8;
 
     fn classify(&self) -> FloatType;
-    unsafe fn format_general_finite(self, buf: *mut u8) -> usize;
-    unsafe fn format_exp_finite(self, buf: *mut u8) -> usize;
+    fn classify_finite(&self) -> FiniteFloatType;
+
+    unsafe fn format_general_finite_nonzero(self, buf: *mut u8) -> usize;
+    unsafe fn format_exp_finite_nonzero(self, buf: *mut u8) -> usize;
 }
 
 impl Sealed for f64 {
@@ -53,13 +62,22 @@ impl Sealed for f64 {
         }
     }
 
-    unsafe fn format_general_finite(self, buf: *mut u8) -> usize {
-        let result = mk_impl::Result::new(self);
-        unsafe { result.format_general(buf) }
+    #[inline]
+    fn classify_finite(&self) -> FiniteFloatType {
+        if self.abs().to_bits() != 0 {
+            FiniteFloatType::Nonzero
+        } else {
+            if self.is_sign_positive() {FiniteFloatType::PosZero} else {FiniteFloatType::NegZero}
+        }
     }
 
-    unsafe fn format_exp_finite(self, buf: *mut u8) -> usize {
-        let result = mk_impl::Result::new(self);
-        unsafe { result.format_exp(buf) }
+    #[inline]
+    unsafe fn format_general_finite_nonzero(self, buf: *mut u8) -> usize {
+        unsafe { mk_impl::Result::new(self).format_general(buf) }
+    }
+
+    #[inline]
+    unsafe fn format_exp_finite_nonzero(self, buf: *mut u8) -> usize {
+        unsafe { mk_impl::Result::new(self).format_exp(buf) }
     }
 }

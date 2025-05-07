@@ -24,7 +24,7 @@ pub struct Decimal {
     mant: Mant,
 }
 
-/// The result of running Tejú Jaguá on a finite `f64`.
+/// The result of running Tejú Jaguá on a **finite**, **nonzero** `f64`.
 #[derive(Debug)]
 #[derive(Clone, Copy)]
 #[derive(PartialEq, Eq)]
@@ -144,8 +144,8 @@ impl Binary {
     /// The core of Tejú Jaguá: finds the shortest decimal representation of `self` if it can, or
     /// the closest if it must.
     #[inline]
-    /*const*/ fn teju_jagua_inner(self) -> Decimal {
-        if self.mant == 0 { return Decimal { exp: 0, mant: 0 } }
+    /*const*/ unsafe fn teju_jagua_inner(self) -> Decimal {
+        debug_assert!(self.mant != 0);
 
         let exp_floor = self.exp_log10_pow2();
         let exp_residual = self.exp_log10_pow2_residual();
@@ -228,12 +228,12 @@ impl Binary {
     }
 
     /// The final Tejú Jaguá: short-circuits the "small integer" case.
-    pub /*const*/ fn teju_jagua(self) -> Decimal {
+    pub /*const*/ unsafe fn teju_jagua(self) -> Decimal {
         if self.is_small_integer() {
             debug_assert!(self.exp <= 0);
             return Decimal{exp: 0, mant: self.mant >> (-self.exp as u32)}.remove_trailing_zeros()
         }
-        self.teju_jagua_inner()
+        unsafe { self.teju_jagua_inner() }
     }
 }
 
@@ -278,15 +278,19 @@ impl Decimal {
 }
 
 impl Result {
+    /// Uses Tejú Jaguá to find a decimal representation for a **finite** and **nonzero** `num`.
+    ///
+    /// If `num` is infinite, NaN, or ±0, this is undefined behaviour.
     #[inline]
-    pub fn new(num: f64) -> Self {
+    pub unsafe fn new(num: f64) -> Self {
         debug_assert!(num.is_finite());
+        debug_assert!(num.abs() != 0.0);
         // dbg!(num);
         // dbg!(Binary::new(num));
         // dbg!(Binary::new(num).teju_jagua());
         Result{
             sign: num.is_sign_positive(),
-            decimal: Binary::new(num).teju_jagua(),
+            decimal: unsafe { Binary::new(num).teju_jagua() },
         }
     }
 
@@ -422,6 +426,7 @@ mod tests {
             fn float_roundtrip(
                 float in f64::MIN .. f64::MAX,
             ) {
+                prop_assume!(float.abs() != 0.0);
                 let binary = Binary::new(float);
                 let refloat = (2f64.powi(binary.exp) * binary.mant as f64).copysign(float);
                 assert_eq!(refloat, float);
@@ -436,8 +441,9 @@ mod tests {
         /// repeat for `-num` (with the opposite sign).
         fn assert_finite(num: f64, decimal: Decimal) {
             assert!(num.is_finite());
-            assert_eq!(Result::new(num.abs()), Result { sign: true, decimal });
-            assert_eq!(Result::new(-num.abs()), Result { sign: false, decimal });
+            assert!(num.abs() != 0.0);
+            assert_eq!(unsafe { Result::new(num.abs()) }, Result { sign: true, decimal });
+            assert_eq!(unsafe { Result::new(-num.abs()) }, Result { sign: false, decimal });
         }
 
         #[test]
@@ -458,7 +464,6 @@ mod tests {
 
         #[test]
         fn extremes() {
-            assert_finite(0.0, Decimal{ exp: 0, mant: 0 });
             assert_finite(4.94065645841246544177e-324, Decimal{ exp: -324, mant: 5 });
             assert_finite(f64::MIN_POSITIVE, Decimal{ exp: -308-16, mant: 22250738585072014 });
             assert_finite(f64::MAX, Decimal{ exp: 308-16, mant: 17976931348623157 });
@@ -472,9 +477,10 @@ mod tests {
             fn integer_roundtrip(
                 int in !INT_BOUND .. INT_BOUND,
             ) {
+                prop_assume!(int != 0);
                 let float = int as f64;
                 assert_eq!(
-                    Result::new(float),
+                    unsafe { Result::new(float) },
                     Result{
                         sign: (int >= 0),
                         decimal: Decimal{ exp: 0, mant: int.unsigned_abs() }.remove_trailing_zeros(),
