@@ -52,6 +52,120 @@ fn std(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(bench, teju_general, teju_exp, ryu, std);
+criterion_group!(microbench, teju_general, teju_exp, ryu, std);
+
+//
+
+fn read_file(fname: &str) -> Vec<f64> {
+    use std::io::{prelude::*, ErrorKind};
+    let mut data = vec![];
+    let mut file = std::fs::File::open(fname).unwrap();
+    let mut buf = [0u8; 8];
+    loop {
+        match file.read_exact(&mut buf) {
+            Ok(()) => data.push(f64::from_ne_bytes(buf)),
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => return data,
+            Err(_) => panic!(),
+        }
+    }
+}
+
+const SIZE: usize = 100_000;
+
+fn benchmark_distribution_finite(c: &mut Criterion, name: &str) {
+    let fname = format!("{}/benches/resources/{}.bin", env!("CARGO_MANIFEST_DIR"), name);
+    let data = read_file(fname.as_str());
+    let mut g = c.benchmark_group(name);
+    g.bench_with_input(BenchmarkId::new("teju", SIZE), &SIZE, |b, _| {
+        b.iter(|| {
+            for &i in &data {
+                let _ = teju::Buffer::new().format_finite(black_box(i));
+            }
+        });
+    });
+    g.bench_with_input(BenchmarkId::new("ryu", SIZE), &SIZE, |b, _| {
+        b.iter(|| {
+            for &i in &data {
+                let _ = ryu::Buffer::new().format_finite(black_box(i));
+            }
+        });
+    });
+    g.bench_with_input(BenchmarkId::new("std", SIZE), &SIZE, |b, _| {
+        b.iter(|| {
+            use std::io::Write;
+            let mut buf = [0u8; 80];
+            for &i in &data {
+                let _ = write!(buf.as_mut_slice(), "{}", black_box(i));
+            }
+        });
+    });
+}
+
+fn benchmark_distribution(c: &mut Criterion, name: &str) {
+    let fname = format!("{}/benches/resources/{}.bin", env!("CARGO_MANIFEST_DIR"), name);
+    let data = read_file(fname.as_str());
+    let mut g = c.benchmark_group(name);
+    g.bench_with_input(BenchmarkId::new("teju", SIZE), &SIZE, |b, _| {
+        b.iter(|| {
+            for &i in &data {
+                let _ = teju::Buffer::new().format(black_box(i));
+            }
+        });
+    });
+    g.bench_with_input(BenchmarkId::new("ryu", SIZE), &SIZE, |b, _| {
+        b.iter(|| {
+            for &i in &data {
+                let _ = ryu::Buffer::new().format(black_box(i));
+            }
+        });
+    });
+    g.bench_with_input(BenchmarkId::new("std", SIZE), &SIZE, |b, _| {
+        b.iter(|| {
+            use std::io::Write;
+            let mut buf = [0u8; 80];
+            for &i in &data {
+                let _ = write!(buf.as_mut_slice(), "{}", black_box(i));
+            }
+        });
+    });
+}
+
+fn uniform_zero_to_one(c: &mut Criterion) {
+    benchmark_distribution_finite(c, "uniform_zero_to_one")
+}
+
+fn unit_gaussian_around_zero(c: &mut Criterion) {
+    benchmark_distribution_finite(c, "unit_gaussian_around_zero")
+}
+
+fn unit_gaussian_around_zero_with_nan(c: &mut Criterion) {
+    benchmark_distribution(c, "unit_gaussian_around_zero_with_nan")
+}
+
+fn pareto_fat_tail(c: &mut Criterion) {
+    benchmark_distribution_finite(c, "pareto_fat_tail")
+}
+
+fn poisson_very_large_mean(c: &mut Criterion) {
+    benchmark_distribution_finite(c, "poisson_very_large_mean")
+}
+
+fn int32(c: &mut Criterion) {
+    benchmark_distribution_finite(c, "int32")
+}
+
+
+criterion_group!(distributions,
+    uniform_zero_to_one,
+    unit_gaussian_around_zero,
+    unit_gaussian_around_zero_with_nan,
+    pareto_fat_tail,
+    poisson_very_large_mean,
+    int32,
+);
+
+//
+
+criterion_main!(microbench, distributions);
 
 criterion_main!(bench);
