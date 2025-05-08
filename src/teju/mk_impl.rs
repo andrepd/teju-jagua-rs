@@ -33,8 +33,6 @@ pub struct Result {
     decimal: Decimal,
 }
 
-// TODO strong typing to keep track of decimal/binary exponent/mantissa?
-
 /// Calculates the result of `a * mult / 2^(2N)` without overflow, where `N` is the number of bits
 /// of `a`, `mult.hi`, `mult.lo`.
 #[inline]
