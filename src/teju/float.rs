@@ -51,16 +51,16 @@ impl Sealed for f64 {
 
     #[inline]
     unsafe fn format_general_finite_nonzero(self, buf: *mut u8) -> usize {
-        unsafe { super::mk_impl::Result::new(self).format_general(buf) }
+        unsafe { crate::teju::f64::Result::new(self).format_general(buf) }
     }
 
     #[inline]
     unsafe fn format_exp_finite_nonzero(self, buf: *mut u8) -> usize {
-        unsafe { super::mk_impl::Result::new(self).format_exp(buf) }
+        unsafe { crate::teju::f64::Result::new(self).format_exp(buf) }
     }
 
     #[inline]
     unsafe fn format_dec_finite_nonzero(self, buf: *mut u8) -> usize {
-        unsafe { super::mk_impl::Result::new(self).format_dec(buf) }
+        unsafe { crate::teju::f64::Result::new(self).format_dec(buf) }
     }
 }

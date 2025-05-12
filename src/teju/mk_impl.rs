@@ -1,12 +1,22 @@
+macro_rules! mk_impl { (
+    float = $f:ident,
+    mant = $mant:ident,
+    mant_signed = $mant_signed:ident,
+    mant_double = $mant_double:ident,
+    bits_mantissa = $bits_mantissa:literal,
+    len_mantissa = $len_mantissa:path,
+    print_mantissa = $print_mantissa:path,
+    print_mantissa_known_len = $print_mantissa_known_len:path,
+) => {
+
 use crate::teju::{common, fmt};
-use crate::teju::lut::f64::*;
 
 /// The mantissa is represented by an unsigned integer the same size as the float (in this case,
-/// u64 for f64).
-pub type Mant = u64;
+/// $m for $f).
+pub type Mant = $mant;
 pub type Exp = common::Exp;
 
-/// The **absolute value** of a finite `f64` decoded into exponent and mantissa.
+/// The **absolute value** of a finite `$f` decoded into exponent and mantissa.
 #[derive(Debug)]
 #[derive(Clone, Copy)]
 #[derive(PartialEq, Eq)]
@@ -15,7 +25,7 @@ pub struct Binary {
     mant: Mant,
 }
 
-/// A decimal representation of the **absolute value** of a finite `f64`.
+/// A decimal representation of the **absolute value** of a finite `$f`.
 #[derive(Debug)]
 #[derive(Clone, Copy)]
 #[derive(PartialEq, Eq)]
@@ -24,7 +34,7 @@ pub struct Decimal {
     mant: Mant,
 }
 
-/// The result of running Tejú Jaguá on a **finite**, **nonzero** `f64`.
+/// The result of running Tejú Jaguá on a **finite**, **nonzero** `$f`.
 #[derive(Debug)]
 #[derive(Clone, Copy)]
 #[derive(PartialEq, Eq)]
@@ -69,25 +79,25 @@ pub const fn is_even(n: Mant) -> bool {
 
 impl Binary {
     /// Number of bits in precision of the mantissa, including the implicit `1.`.
-    const BITS_MANTISSA: u32 = 53;
+    const BITS_MANTISSA: u32 = $bits_mantissa;
 
     /// Number of bits of the mantissa that are actually stored.
     const BITS_MANTISSA_EXPLICIT: u32 = Self::BITS_MANTISSA - 1;
 
     /// The exponent bias, including the implicit factor of `2 ^ Self::BITS_MANTISSA` from treating
     /// the mantissa as a fixed-point decimal.
-    const MIN_EXP: Exp = f64::MIN_EXP - Self::BITS_MANTISSA as i32;
+    const MIN_EXP: Exp = $f::MIN_EXP - Self::BITS_MANTISSA as i32;
 
     /// 1 + the maximum mantissa value storable in a float.
     const MAX_MANT: Mant = 1 << Self::BITS_MANTISSA_EXPLICIT;
 
-    /// Decomposes a **finite** `f64` into the binary exponent and mantissa of its absolute
+    /// Decomposes a **finite** `$f` into the binary exponent and mantissa of its absolute
     /// value, i.e. such that `|num| = mant * 2^exp`.
     ///
     /// If `num` is infinite or NaN, returns an unspecified value; this is not checked except in
     /// debug assertions.
     #[inline]
-    pub const fn new(num: f64) -> Self {
+    pub const fn new(num: $f) -> Self {
         debug_assert!(num.is_finite());
 
         let num = num.abs();
@@ -121,7 +131,7 @@ impl Binary {
 
     /// Checks whether `self.mant` is a multiple of `2 ^ self.exp`.
     ///
-    /// If not `0 ≤ self.exp < f64::BITS`, this returns an unspecified value.
+    /// If not `0 ≤ self.exp < $f::BITS`, this returns an unspecified value.
     #[inline]
     const fn is_multiple_of_pow2(&self) -> bool {
         /*(self.mant >> self.exp) << self.exp == self.mant*/
@@ -129,7 +139,7 @@ impl Binary {
     }
 
     /// Checks whether `self` is a "small integer", i.e. in the range of the contiguous integers
-    /// representable by an `f64` without rounding.
+    /// representable by an `$f` without rounding.
     #[inline]
     const fn is_small_integer(&self) -> bool {
         // `self.exp` has to be in the interval [0; BITS_MANTISSA[, and `self` must be a clean
@@ -148,7 +158,7 @@ impl Binary {
         let exp_floor = self.exp_log10_pow2();
         let exp_residual = self.exp_log10_pow2_residual();
         // SAFETY: exp_floor is in bounds
-        let mult = unsafe { MULTIPLIERS.get(exp_floor) };
+        let mult = unsafe { lut::MULTIPLIERS.get(exp_floor) };
 
         // Case 1: centered
         if self.mant != Self::MAX_MANT || self.exp == Self::MIN_EXP {
@@ -253,7 +263,7 @@ impl Decimal {
     #[inline]
     /*const*/ fn is_multiple_of_pow5(&self) -> bool {
         // SAFETY: 
-        let entry = unsafe { MULT_INVERSES.get(self.exp) };
+        let entry = unsafe { lut::MULT_INVERSES.get(self.exp) };
         // self.mant * entry.multiplier <= entry.bound
         self.mant.wrapping_mul(entry.multiplier) <= entry.bound
     }
@@ -261,7 +271,7 @@ impl Decimal {
     /// Shortens `self` by removing trailing zeros from `self.mant` while possible, and
     /// incrementing `self.exp` by the same amount.
     const fn remove_trailing_zeros(mut self) -> Self {
-        const M_INV5: Mant = -((Mant::MAX / 5) as i64) as Mant;
+        const M_INV5: Mant = -((Mant::MAX / 5) as $mant_signed) as Mant;
         const BOUND: Mant = Mant::MAX / 10 + 1;
         loop {
             // let q = (self.mant * M_INV5).rotate_right(1);
@@ -280,7 +290,7 @@ impl Result {
     ///
     /// If `num` is infinite, NaN, or ±0, this is undefined behaviour.
     #[inline]
-    pub unsafe fn new(num: f64) -> Self {
+    pub unsafe fn new(num: $f) -> Self {
         debug_assert!(num.is_finite());
         debug_assert!(num.abs() != 0.0);
         // dbg!(num);
@@ -302,8 +312,8 @@ impl Result {
             *buf.add(2) = b'0';
             /*let mant_len = fmt::print_u64_mantissa(self.decimal.mant, buf.add(1));*/
             let mant_len = {
-                let len = fmt::len_u64(self.decimal.mant);
-                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf.add(1), len)
+                let len = $len_mantissa(self.decimal.mant);
+                $print_mantissa_known_len(self.decimal.mant, buf.add(1), len)
             };
 
             *buf = *buf.add(1);
@@ -343,14 +353,14 @@ impl Result {
             buf.write(b'-');
             buf = buf.add(!self.sign as usize);
 
-            let mant_len = fmt::len_u64(self.decimal.mant);
+            let mant_len = $len_mantissa(self.decimal.mant);
             let decimal_exp = mant_len as i32 + self.decimal.exp;
 
             if self.decimal.exp >= 0 && decimal_exp <= 16 {  // Implies mant_len <= 16
                 // 1234e7 -> 12340000000.0
                 // Write mantissa, pad with zeros (up to 17 of them), write decimal point at
                 // `decimal_exp`. Careful not to overflow 32 byte `buf`.
-                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf, mant_len);
+                $print_mantissa_known_len(self.decimal.mant, buf, mant_len);
                 core::ptr::write_bytes(buf.add(mant_len), b'0', 8);
                 if mant_len < 8 { core::ptr::write_bytes(buf.add(mant_len + 8), b'0', 10) };
                 *buf.add(decimal_exp as usize) = b'.';
@@ -360,7 +370,7 @@ impl Result {
                 // Write mantissa, shift digits after `decimal_exp` digit 1 place to the right,
                 // write decimal point in between.
                 debug_assert!(self.decimal.exp < 0);
-                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf, mant_len);
+                $print_mantissa_known_len(self.decimal.mant, buf, mant_len);
                 core::ptr::copy(
                     buf.add(decimal_exp as usize),
                     buf.add(decimal_exp as usize + 1),
@@ -375,7 +385,7 @@ impl Result {
                 core::ptr::write_bytes(buf, b'0', 8);
                 *buf.add(1) = b'.';
                 let n_zeros = (2 - decimal_exp) as usize;
-                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf.add(n_zeros), mant_len);
+                $print_mantissa_known_len(self.decimal.mant, buf.add(n_zeros), mant_len);
                 (!self.sign as i32 + 2 - self.decimal.exp) as usize
             } else if mant_len == 1 {
                 // 1e30
@@ -387,7 +397,7 @@ impl Result {
             } else {
                 // 1234e30 -> 1.234e33
                 // Write mantissa, shift first digit to add decimal point, then `e`, then exponent.
-                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf.add(1), mant_len);
+                $print_mantissa_known_len(self.decimal.mant, buf.add(1), mant_len);
                 *buf = *buf.add(1);
                 *buf.add(1) = b'.';
                 *buf.add(mant_len + 1) = b'e';                
@@ -403,14 +413,14 @@ impl Result {
             buf.write(b'-');
             buf = buf.add(!self.sign as usize);
 
-            let mant_len = fmt::len_u64(self.decimal.mant);
+            let mant_len = $len_mantissa(self.decimal.mant);
             let decimal_exp = mant_len as i32 + self.decimal.exp;
 
             if self.decimal.exp >= 0 {
                 // 1234e7 -> 12340000000.0
                 // Write mantissa, pad with zeros (in 8 byte chunks), write decimal point at
                 // `decimal_exp`.
-                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf, mant_len);
+                $print_mantissa_known_len(self.decimal.mant, buf, mant_len);
                 let n_zeros = self.decimal.exp as usize + 2;
                 core::ptr::write_bytes(buf.add(mant_len), b'0', n_zeros.next_multiple_of(8));
                 *buf.add(decimal_exp as usize) = b'.';
@@ -419,7 +429,7 @@ impl Result {
                 // 1234e-1 -> 123.4
                 // Write mantissa, shift digits after `decimal_exp` digit 1 place to the right,
                 // write decimal point in between.
-                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf, mant_len);
+                $print_mantissa_known_len(self.decimal.mant, buf, mant_len);
                 core::ptr::copy(
                     buf.add(decimal_exp as usize),
                     buf.add(decimal_exp as usize + 1),
@@ -434,7 +444,7 @@ impl Result {
                 let n_zeros = (2 - decimal_exp) as usize;
                 core::ptr::write_bytes(buf, b'0', n_zeros.next_multiple_of(8));
                 *buf.add(1) = b'.';
-                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf.add(n_zeros), mant_len);
+                $print_mantissa_known_len(self.decimal.mant, buf.add(n_zeros), mant_len);
                 (!self.sign as i32 + 2 - self.decimal.exp) as usize
             }
         }
@@ -514,7 +524,7 @@ mod tests {
             assert_finite(f64::MAX, Decimal{ exp: 308-16, mant: 17976931348623157 });
         }
 
-        const INT_BOUND: i64 = (1u64 << Binary::BITS_MANTISSA) as i64;
+        const INT_BOUND: $mant_signed = (1u64 << Binary::BITS_MANTISSA) as $mant_signed;
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(200_000))]
             
@@ -802,3 +812,7 @@ mod tests {
         }
     }
 }
+
+}} // mk_impl
+
+pub(crate) use mk_impl;
