@@ -361,7 +361,11 @@ impl Result {
                 // write decimal point in between.
                 debug_assert!(self.decimal.exp < 0);
                 fmt::print_u64_mantissa_known_len(self.decimal.mant, buf, mant_len);
-                core::ptr::copy(buf.add(decimal_exp as usize), buf.add(decimal_exp as usize + 1), -self.decimal.exp as usize);
+                core::ptr::copy(
+                    buf.add(decimal_exp as usize),
+                    buf.add(decimal_exp as usize + 1),
+                    -self.decimal.exp as usize,
+                );
                 *buf.add(decimal_exp as usize) = b'.';
                 !self.sign as usize + mant_len + 1
             } else if -5 < decimal_exp && decimal_exp <= 0 {
@@ -370,8 +374,8 @@ impl Result {
                 // mantissa after.
                 core::ptr::write_bytes(buf, b'0', 8);
                 *buf.add(1) = b'.';
-                let offset = (2 - decimal_exp) as usize;
-                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf.add(offset), mant_len);
+                let n_zeros = (2 - decimal_exp) as usize;
+                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf.add(n_zeros), mant_len);
                 (!self.sign as i32 + 2 - self.decimal.exp) as usize
             } else if mant_len == 1 {
                 // 1e30
@@ -389,6 +393,49 @@ impl Result {
                 *buf.add(mant_len + 1) = b'e';                
                 let exp_len = fmt::print_i32_exp(decimal_exp - 1, buf.add(2 + mant_len));
                 !self.sign as usize + 2 + mant_len + exp_len
+            }
+        }
+    }
+
+    #[inline]
+    pub unsafe fn format_dec(self, mut buf: *mut u8) -> usize {
+        unsafe {
+            buf.write(b'-');
+            buf = buf.add(!self.sign as usize);
+
+            let mant_len = fmt::len_u64(self.decimal.mant);
+            let decimal_exp = mant_len as i32 + self.decimal.exp;
+
+            if self.decimal.exp >= 0 {
+                // 1234e7 -> 12340000000.0
+                // Write mantissa, pad with zeros (in 8 byte chunks), write decimal point at
+                // `decimal_exp`.
+                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf, mant_len);
+                let n_zeros = self.decimal.exp as usize + 2;
+                core::ptr::write_bytes(buf.add(mant_len), b'0', n_zeros.next_multiple_of(8));
+                *buf.add(decimal_exp as usize) = b'.';
+                !self.sign as usize + decimal_exp as usize + 2
+            } else if decimal_exp > 0 {
+                // 1234e-1 -> 123.4
+                // Write mantissa, shift digits after `decimal_exp` digit 1 place to the right,
+                // write decimal point in between.
+                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf, mant_len);
+                core::ptr::copy(
+                    buf.add(decimal_exp as usize),
+                    buf.add(decimal_exp as usize + 1),
+                    -self.decimal.exp as usize,
+                );
+                *buf.add(decimal_exp as usize) = b'.';
+                !self.sign as usize + mant_len + 1
+            } else {
+                // 1234e-6 -> 0.001234
+                // Pad with zeros (in 8 byte chunks), write decimal point at second digit, write
+                // mantissa after.
+                let n_zeros = (2 - decimal_exp) as usize;
+                core::ptr::write_bytes(buf, b'0', n_zeros.next_multiple_of(8));
+                *buf.add(1) = b'.';
+                fmt::print_u64_mantissa_known_len(self.decimal.mant, buf.add(n_zeros), mant_len);
+                (!self.sign as i32 + 2 - self.decimal.exp) as usize
             }
         }
     }
@@ -486,36 +533,27 @@ mod tests {
                 )
             }
             
-            #[test]
-            fn float_roundtrip_general(
+            /*#[test]
+            fn float_roundtrip(
                 float in f64::MIN .. f64::MAX,
             ) {
-                let mut buf = crate::Buffer::new();
-                let str = buf.format(float);
-                let refloat = str.parse().unwrap();
+                prop_assume!(float.abs() != 0.0);
+                let result = unsafe { Result::new(float) };
+                let refloat = 10f64.powi(result.decimal.exp) * result.decimal.mant as f64;
+                let refloat = if result.sign {refloat} else {-refloat};
                 assert_eq!(float, refloat)
-            }
-            
-            #[test]
-            fn float_roundtrip_exp(
-                float in f64::MIN .. f64::MAX,
-            ) {
-                let mut buf = crate::Buffer::new();
-                let str = buf.format_exp(float);
-                let refloat = str.parse().unwrap();
-                assert_eq!(float, refloat)
-            }
+            }*/
         }
     }
 
     mod string {
         use super::*;
 
-        /// Aux function, assert that `num` is serialised as `str`, both via `format` and
-        /// `format_finite`; repeat for `-num` being serialised as `-str`.
+        /// Aux function, assert that `num` is serialised as `str` via `format{,_finite}`. Repeat
+        /// for `-num`.
         fn assert_finite(num: f64, str: &str) {
             assert!(num.is_finite());
-
+            assert_eq!(str.parse::<f64>().unwrap(), num, "Incorrect test case!");
             let str_neg = 
                 if num.is_sign_positive() {
                     "-".to_string() + str
@@ -533,11 +571,11 @@ mod tests {
             assert_eq!(crate::Buffer::new().format(-num), ryu::Buffer::new().format(-num));
         }
 
-        /// Aux function, assert that `num` is serialised as `str`, both via `format_exp` and
-        /// `format_exp_finite`; repeat for `-num` being serialised as `-str`.
+        /// Aux function, assert that `num` is serialised as `str` via `format_exp{,_finite}`.
+        /// Repeat for `-num`.
         fn assert_exp_finite(num: f64, str: &str) {
             assert!(num.is_finite());
-
+            assert_eq!(str.parse::<f64>().unwrap(), num, "Incorrect test case!");
             let str_neg = 
                 if num.is_sign_positive() {
                     "-".to_string() + str
@@ -550,6 +588,35 @@ mod tests {
 
             assert_eq!(crate::Buffer::new().format_exp(-num), str_neg.as_str());
             assert_eq!(crate::Buffer::new().format_exp_finite(-num), str_neg.as_str());
+        }
+
+        /// Aux function, assert that `num` is serialised as `str` via `format_dec{,_finite}`.
+        /// Repeat for `-num`.
+        fn assert_dec_finite(num: f64, str: &str) {
+            assert!(num.is_finite());
+            assert_eq!(str.parse::<f64>().unwrap(), num, "Incorrect test case!");
+            let str_neg = 
+                if num.is_sign_positive() {
+                    "-".to_string() + str
+                } else {
+                    str[1..].to_string()
+                };
+
+            assert_eq!(crate::Buffer::new().format_dec(num), str);
+            assert_eq!(crate::Buffer::new().format_dec_finite(num), str);
+
+            assert_eq!(crate::Buffer::new().format_dec(-num), str_neg.as_str());
+            assert_eq!(crate::Buffer::new().format_dec_finite(-num), str_neg.as_str());
+        }
+
+        /// Aux function, assert that `num` is serialised as `str_general` via `format
+        /// {,_finite}`, as `str_exp` via `format_exp{,_finite}`, and as `str_dec` via `format_dec
+        /// {,_finite}`. Repeat for `-num`.
+        fn assert_all_finite(num: f64, str_general: &str, str_exp: &str, str_dec: &str) {
+            assert!(num.is_finite());
+            assert_finite(num, str_general);
+            assert_exp_finite(num, str_exp);
+            assert_dec_finite(num, str_dec);
         }
 
         #[test]
@@ -570,41 +637,88 @@ mod tests {
 
         #[test]
         fn small() {
-            assert_finite(123.456, "123.456");
-            assert_finite(0.1234, "0.1234");
-            assert_finite(core::f64::consts::PI, "3.141592653589793");
-            assert_finite(core::f64::consts::E, "2.718281828459045");
-            assert_finite(core::f64::consts::LN_2, "0.6931471805599453");
-
-            assert_exp_finite(123.456, "1.23456e2");
-            assert_exp_finite(0.1234, "1.234e-1");
-            assert_exp_finite(core::f64::consts::PI, "3.141592653589793e0");
-            assert_exp_finite(core::f64::consts::E, "2.718281828459045e0");
-            assert_exp_finite(core::f64::consts::LN_2, "6.931471805599453e-1");
+            assert_all_finite(
+                123.456,
+                "123.456",
+                "1.23456e2",
+                "123.456",
+            );
+            assert_all_finite(
+                0.1234,
+                "0.1234",
+                "1.234e-1",
+                "0.1234",
+            );
+            assert_all_finite(
+                0.001234,
+                "0.001234",
+                "1.234e-3",
+                "0.001234",
+            );
+            assert_all_finite(
+                core::f64::consts::PI,
+                "3.141592653589793",
+                "3.141592653589793e0",
+                "3.141592653589793",
+            );
+            assert_all_finite(
+                core::f64::consts::E,
+                "2.718281828459045",
+                "2.718281828459045e0",
+                "2.718281828459045",
+            );
+            assert_all_finite(
+                core::f64::consts::LN_2,
+                "0.6931471805599453",
+                "6.931471805599453e-1",
+                "0.6931471805599453",
+            );
         }
 
         #[test]
         fn small_integer() {
-            assert_finite(123456., "123456.0");
-            assert_finite(1., "1.0");
-            assert_finite(123000123000., "123000123000.0");
-
-            assert_exp_finite(123456., "1.23456e5");
-            assert_exp_finite(1., "1e0");
-            assert_exp_finite(123000123000., "1.23000123e11");
+            assert_all_finite(
+                123456.,
+                "123456.0",
+                "1.23456e5",
+                "123456.0",
+            );
+            assert_all_finite(
+                1.,
+                "1.0",
+                "1e0",
+                "1.0",
+            );
+            assert_all_finite(
+                123000123000.,
+                "123000123000.0",
+                "1.23000123e11",
+                "123000123000.0",
+            );
         }
 
         #[test]
         fn extremes() {
-            assert_finite(0.0, "0.0");
-            assert_finite(4.94065645841246544177e-324, "5e-324");
-            assert_finite(f64::MIN_POSITIVE, "2.2250738585072014e-308" );
-            assert_finite(f64::MAX, "1.7976931348623157e308" );
-
-            assert_exp_finite(0.0, "0e0");
-            assert_exp_finite(4.94065645841246544177e-324, "5e-324");
-            assert_exp_finite(f64::MIN_POSITIVE, "2.2250738585072014e-308" );
-            assert_exp_finite(f64::MAX, "1.7976931348623157e308" );
+            assert_all_finite(0.0,
+                "0.0",
+                "0e0",
+                "0.0",
+            );
+            assert_all_finite(4.94065645841246544177e-324,
+                "5e-324",
+                "5e-324",
+                "0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005",
+            );
+            assert_all_finite(f64::MIN_POSITIVE,
+                "2.2250738585072014e-308",
+                "2.2250738585072014e-308",
+                "0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000022250738585072014",
+            );
+            assert_all_finite(f64::MAX,
+                "1.7976931348623157e308",
+                "1.7976931348623157e308",
+                "179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0",
+            );
         }
 
         #[test]
@@ -619,6 +733,12 @@ mod tests {
             assert_eq!(crate::Buffer::new().format_exp(f64::INFINITY), "inf");
             assert_eq!(crate::Buffer::new().format_exp(f64::NEG_INFINITY), "-inf");
 
+            assert_eq!(crate::Buffer::new().format_dec(f64::NAN), "NaN");
+            assert_eq!(crate::Buffer::new().format_dec(-f64::NAN), "NaN");
+            assert_eq!(crate::Buffer::new().format_dec(f64::INFINITY), "inf");
+            assert_eq!(crate::Buffer::new().format_dec(f64::NEG_INFINITY), "-inf");
+
+            // No crash
             if !cfg!(debug_assertions) {
                 crate::Buffer::new().format_finite(f64::NAN);
                 crate::Buffer::new().format_finite(-f64::NAN);
@@ -629,12 +749,47 @@ mod tests {
                 crate::Buffer::new().format_exp_finite(-f64::NAN);
                 crate::Buffer::new().format_exp_finite(f64::INFINITY);
                 crate::Buffer::new().format_exp_finite(f64::NEG_INFINITY);
+
+                crate::Buffer::new().format_dec_finite(f64::NAN);
+                crate::Buffer::new().format_dec_finite(-f64::NAN);
+                crate::Buffer::new().format_dec_finite(f64::INFINITY);
+                crate::Buffer::new().format_dec_finite(f64::NEG_INFINITY);
             }
         }
 
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(800_000))]
+                        
+            #[test]
+            fn float_roundtrip_general(
+                float in f64::MIN .. f64::MAX,
+            ) {
+                let mut buf = crate::Buffer::new();
+                let str = buf.format(float);
+                let refloat = str.parse().unwrap();
+                assert_eq!(float, refloat)
+            }
             
+            #[test]
+            fn float_roundtrip_exp(
+                float in f64::MIN .. f64::MAX,
+            ) {
+                let mut buf = crate::Buffer::new();
+                let str = buf.format_exp(float);
+                let refloat = str.parse().unwrap();
+                assert_eq!(float, refloat)
+            }
+            
+            #[test]
+            fn float_roundtrip_dec(
+                float in f64::MIN .. f64::MAX,
+            ) {
+                let mut buf = crate::Buffer::new();
+                let str = buf.format_dec(float);
+                let refloat = str.parse().unwrap();
+                assert_eq!(float, refloat)
+            }
+
             #[test]
             fn ryu(
                 float in f64::MIN .. f64::MAX

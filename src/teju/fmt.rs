@@ -70,6 +70,7 @@ pub fn len_u64(x: u64) -> usize {
 /// Performance should be better than `len_u64` + `print_u64_mantissa_known_len` if `len_u64` is
 /// not well predicted, and worse if not (but microbenchmarks don't show this!).
 #[inline]
+#[allow(unused)]
 pub unsafe fn print_u64_mantissa(x: u64, buf: *mut u8) -> usize {
     debug_assert!(x < 10u64.pow(17));
     unsafe {
@@ -126,6 +127,7 @@ pub unsafe fn print_u64_mantissa(x: u64, buf: *mut u8) -> usize {
 /// most 17 digits. May clobber / write junk to `buf` after the bytes written (up to 20 bytes in
 /// total).
 #[inline]
+#[allow(unused)]
 pub unsafe fn print_u64_mantissa_known_len(x: u64, buf: *mut u8, len: usize) -> usize {
     debug_assert!(x < 10u64.pow(17));
     debug_assert!(len <= 17);
