@@ -10,7 +10,10 @@ pub struct General;
 pub struct Scientific;
 pub struct Decimal;
 
-pub trait Sealed {
+pub trait Sealed
+where
+    Self::Buffer: core::panic::RefUnwindSafe + Send + Sync + Unpin + core::panic::UnwindSafe 
+{
     type Buffer;
     fn new_buffer() -> Self::Buffer;
     fn buffer_as_ptr(buf: &mut Self::Buffer) -> *mut u8;

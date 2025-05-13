@@ -19,7 +19,10 @@ pub enum FiniteFloatType {
     NegZero,
 }
 
-pub trait Sealed {
+pub trait Sealed
+where
+    Self: core::panic::RefUnwindSafe + Send + Sync + Unpin + core::panic::UnwindSafe 
+{
     fn classify(&self) -> FloatType;
     fn classify_finite(&self) -> FiniteFloatType;
 

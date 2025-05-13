@@ -28,6 +28,17 @@ fn teju_general(c: &mut Criterion) {
     g.finish();
 }
 
+/*fn teju_core(c: &mut Criterion) {
+    let mut g = c.benchmark_group("teju_core");
+
+    for num in NUMS {
+        g.bench_with_input(benchmark_id(*num), num, |b, &num| {
+            b.iter(|| unsafe { teju::teju::mk_impl::Result::new(num) } );
+        });
+    }
+    g.finish();
+}*/
+
 fn ryu(c: &mut Criterion) {
     let mut g = c.benchmark_group("ryu");
 
@@ -167,5 +178,3 @@ criterion_group!(distributions,
 //
 
 criterion_main!(microbench, distributions);
-
-criterion_main!(bench);
