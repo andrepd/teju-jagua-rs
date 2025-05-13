@@ -14,7 +14,7 @@ pub mod lut {
 
     // TODO: generate with crabtime
 
-    pub const MULTIPLIERS: Multipliers<Mant, 617> = Multipliers::new([
+    pub const MULTIPLIERS: Multipliers<Mant, 617, {super::Binary::MIN_EXP}> = Multipliers::new([
         Multiplier{ hi: 0x9e19db92b4e31ba9, lo: 0x6c07a2c26a8346d2 },
         Multiplier{ hi: 0xfcf62c1dee382c42, lo: 0x46729e03dd9ed7b6 },
         Multiplier{ hi: 0xca5e89b18b602368, lo: 0x385bb19cb14bdfc5 },

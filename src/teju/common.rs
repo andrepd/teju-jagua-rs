@@ -34,7 +34,7 @@ pub const fn exp_log10_pow2_residual(exp: i32) -> u32 {
 
 //
 
-pub struct Multipliers<T, const N: usize> (
+pub struct Multipliers<T, const N: usize, const MIN_EXP: i32> (
     [Multiplier<T>; N]
 );
 
@@ -43,10 +43,8 @@ pub struct Multiplier<T> {
     pub lo: T,
 }
 
-impl<T, const N: usize> Multipliers<T, N> {
-    // pub const LEN: usize = N;
-
-    const OFFSET: i32 = -324; // TODO
+impl<T, const N: usize, const MIN_EXP: i32> Multipliers<T, N, MIN_EXP> {
+    const OFFSET: i32 = exp_log10_pow2(MIN_EXP);
 
     pub const fn new(table: [Multiplier<T>; N]) -> Self {
         Self(table)
@@ -69,8 +67,6 @@ pub struct MultInverse<T> {
 }
 
 impl<T, const N: usize> MultInverses<T, N> {
-    // pub const LEN: usize = N;
-
     pub const fn new(table: [MultInverse<T>; N]) -> Self {
         Self(table)
     }
