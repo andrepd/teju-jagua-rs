@@ -3,7 +3,6 @@ macro_rules! mk_impl { (
     mant = $mant:ident,
     mant_signed = $mant_signed:ident,
     mant_double = $mant_double:ident,
-    bits_mantissa = $bits_mantissa:literal,
     len_mantissa = $len_mantissa:path,
     print_mantissa = $print_mantissa:path,
     print_mantissa_known_len = $print_mantissa_known_len:path,
@@ -79,7 +78,7 @@ pub const fn is_even(n: Mant) -> bool {
 
 impl Binary {
     /// Number of bits in precision of the mantissa, including the implicit `1.`.
-    const BITS_MANTISSA: u32 = $bits_mantissa;
+    const BITS_MANTISSA: u32 = $f::MANTISSA_DIGITS;
 
     /// Number of bits of the mantissa that are actually stored.
     const BITS_MANTISSA_EXPLICIT: u32 = Self::BITS_MANTISSA - 1;
@@ -152,7 +151,7 @@ impl Binary {
     /// The core of Tejú Jaguá: finds the shortest decimal representation of `self` if it can, or
     /// the closest if it must.
     #[inline]
-    /*const*/ unsafe fn teju_jagua_inner(self) -> Decimal {
+    const unsafe fn teju_jagua_inner(self) -> Decimal {
         debug_assert!(self.mant != 0);
 
         let exp_floor = self.exp_log10_pow2();
@@ -236,7 +235,7 @@ impl Binary {
     }
 
     /// The final Tejú Jaguá: short-circuits the "small integer" case.
-    pub /*const*/ unsafe fn teju_jagua(self) -> Decimal {
+    pub const unsafe fn teju_jagua(self) -> Decimal {
         if self.is_small_integer() {
             debug_assert!(self.exp <= 0);
             return Decimal{exp: 0, mant: self.mant >> (-self.exp as u32)}.remove_trailing_zeros()
@@ -247,13 +246,13 @@ impl Binary {
 
 impl Decimal {
     #[inline]
-    /*const*/ fn is_tie(&self) -> bool {
+    const fn is_tie(&self) -> bool {
         0 <= self.exp && (self.exp as usize) < 27
             && self.is_multiple_of_pow5()
     }
 
     #[inline]
-    /*const*/ fn is_tie_uncentered(&self) -> bool {
+    const fn is_tie_uncentered(&self) -> bool {
         self.mant % 5 == 0
             && 0 <= self.exp
             && self.is_multiple_of_pow5()
@@ -261,7 +260,7 @@ impl Decimal {
 
     /// Checks whether `self.mant` is a "small" multiple of `5 ^ self.exp`.
     #[inline]
-    /*const*/ fn is_multiple_of_pow5(&self) -> bool {
+    const fn is_multiple_of_pow5(&self) -> bool {
         // SAFETY: 
         let entry = unsafe { lut::MULT_INVERSES.get(self.exp) };
         // self.mant * entry.multiplier <= entry.bound

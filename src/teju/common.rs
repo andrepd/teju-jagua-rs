@@ -52,10 +52,10 @@ impl<T, const N: usize> Multipliers<T, N> {
         Self(table)
     }
 
-    pub unsafe fn get(&self, exp_floor: i32) -> &Multiplier<T> {
+    pub const unsafe fn get(&self, exp_floor: i32) -> &Multiplier<T> {
         let idx = exp_floor - Self::OFFSET;
-        // debug_assert!(0 <= idx && idx < N as i32);
-        unsafe { self.0.get_unchecked(idx as usize) }
+        debug_assert!(0 <= idx && idx < N as i32);
+        unsafe { &*self.0.as_ptr().add(idx as usize) }
     }
 }
 
@@ -75,8 +75,8 @@ impl<T, const N: usize> MultInverses<T, N> {
         Self(table)
     }
 
-    pub unsafe fn get(&self, exp_floor: i32) -> &MultInverse<T> {
-        // debug_assert!(0 <= exp_floor && exp_floor < N as i32);
-        unsafe { self.0.get_unchecked(exp_floor as usize) }
+    pub const unsafe fn get(&self, exp_floor: i32) -> &MultInverse<T> {
+        debug_assert!(0 <= exp_floor && exp_floor < N as i32);
+        unsafe { &*self.0.as_ptr().add(exp_floor as usize) }
     }
 }

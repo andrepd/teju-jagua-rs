@@ -3,7 +3,6 @@ super::mk_impl::mk_impl! {
     mant = u64,
     mant_signed = i64,
     mant_double = u128,
-    bits_mantissa = 53,
     len_mantissa = crate::teju::fmt::len_u64,
     print_mantissa = crate::teju::fmt::print_u64_mantissa,
     print_mantissa_known_len = crate::teju::fmt::print_u64_mantissa_known_len,
