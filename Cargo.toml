@@ -1,6 +1,6 @@
 [package]
 name = "teju"
-version = "0.1.0-alpha1"
+version = "0.1.0-alpha2"
 edition = "2024"
 description = "Fast floating point to string conversion"
 repository = "https://github.com/andrepd/teju-jagua-rs"
