@@ -451,6 +451,45 @@ impl Result {
     }
 }
 
+use $crate::teju::float::{FloatType, FiniteFloatType};
+
+impl $crate::teju::float::Sealed for $f {
+    #[inline]
+    fn classify(&self) -> FloatType {
+        if self.is_finite() {
+            FloatType::Finite
+        } else if self.is_infinite() {
+            if self.is_sign_positive() {FloatType::PosInf} else {FloatType::NegInf}
+        } else {
+            FloatType::Nan
+        }
+    }
+
+    #[inline]
+    fn classify_finite(&self) -> FiniteFloatType {
+        if self.abs().to_bits() != 0 {
+            FiniteFloatType::Nonzero
+        } else {
+            if self.is_sign_positive() {FiniteFloatType::PosZero} else {FiniteFloatType::NegZero}
+        }
+    }
+
+    #[inline]
+    unsafe fn format_general_finite_nonzero(self, buf: *mut u8) -> usize {
+        unsafe { Result::new(self).format_general(buf) }
+    }
+
+    #[inline]
+    unsafe fn format_exp_finite_nonzero(self, buf: *mut u8) -> usize {
+        unsafe { Result::new(self).format_exp(buf) }
+    }
+
+    #[inline]
+    unsafe fn format_dec_finite_nonzero(self, buf: *mut u8) -> usize {
+        unsafe { Result::new(self).format_dec(buf) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
