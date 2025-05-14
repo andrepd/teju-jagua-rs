@@ -3,6 +3,7 @@
 /// This trait is "sealed", meaning it cannot be implemented for any other types.
 pub trait Float: Sealed {}
 impl Float for f64 {}
+impl Float for f32 {}
 
 #[derive(Debug)]
 pub enum FloatType {
