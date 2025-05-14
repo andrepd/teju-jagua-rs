@@ -67,12 +67,14 @@ pub struct MultInverse<T> {
 }
 
 impl<T, const N: usize> MultInverses<T, N> {
+    pub const fn len(&self) -> usize { N }
+
     pub const fn new(table: [MultInverse<T>; N]) -> Self {
         Self(table)
     }
 
-    pub const unsafe fn get(&self, exp_floor: i32) -> &MultInverse<T> {
-        debug_assert!(0 <= exp_floor && exp_floor < N as i32);
-        unsafe { &*self.0.as_ptr().add(exp_floor as usize) }
+    pub const unsafe fn get(&self, exp: i32) -> &MultInverse<T> {
+        debug_assert!(0 <= exp && exp < N as i32);
+        unsafe { &*self.0.as_ptr().add(exp as usize) }
     }
 }
