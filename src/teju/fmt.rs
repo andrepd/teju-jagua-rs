@@ -15,7 +15,7 @@ const DIGITS_LUT: &[u8; 200] =
       90919293949596979899";
 
 #[inline]
-unsafe fn write_lut_u64(buf: *mut u8, offset: usize, lo: u64, hi: u64) {
+const unsafe fn write_lut_u64(buf: *mut u8, offset: usize, lo: u64, hi: u64) {
     unsafe {
         let digits = DIGITS_LUT.as_ptr().add((lo * 2 - hi * 200) as usize);
         core::ptr::copy_nonoverlapping(digits, buf.add(offset), 2);
@@ -23,7 +23,7 @@ unsafe fn write_lut_u64(buf: *mut u8, offset: usize, lo: u64, hi: u64) {
 }
 
 /// Number of digits of `x`. Invariant: `x` has at most 17 digits.
-pub fn len_u64(x: u64) -> usize {
+pub const fn len_u64(x: u64) -> usize {
     debug_assert!(x < 10u64.pow(17));
     // Hypothesis: the average output length among all `f64`s is 16.38 digits, so high-to-low is
     // likelier to get well predicted.
@@ -71,7 +71,7 @@ pub fn len_u64(x: u64) -> usize {
 /// not well predicted, and worse if not (but microbenchmarks don't show this!).
 #[inline]
 #[allow(unused)]
-pub unsafe fn print_u64_mantissa(x: u64, buf: *mut u8) -> usize {
+pub const unsafe fn print_u64_mantissa(x: u64, buf: *mut u8) -> usize {
     debug_assert!(x < 10u64.pow(17));
     unsafe {
         if x == 0 {
@@ -115,11 +115,11 @@ pub unsafe fn print_u64_mantissa(x: u64, buf: *mut u8) -> usize {
         // No need to calculate the `len_u64` beforehand, this is an arithmetic way to get that
         // value.
         let neg_log2 = x.leading_zeros() as usize;
-        let offset = neg_log2 * 1233 >> 12; // 1233 / 2**12 ≈ log10(2)
+        let offset = (neg_log2 * 1233) >> 12; // 1233 / 2**12 ≈ log10(2)
         let offset = offset + (*digits_ptr.add(offset) == b'0') as usize;
 
         core::ptr::copy_nonoverlapping(digits_ptr.add(offset), buf, 20);
-        return 20 - offset;
+        20 - offset
     }
 }
 
@@ -128,7 +128,7 @@ pub unsafe fn print_u64_mantissa(x: u64, buf: *mut u8) -> usize {
 /// total).
 #[inline]
 #[allow(unused)]
-pub unsafe fn print_u64_mantissa_known_len(x: u64, buf: *mut u8, len: usize) -> usize {
+pub const unsafe fn print_u64_mantissa_known_len(x: u64, buf: *mut u8, len: usize) -> usize {
     debug_assert!(x < 10u64.pow(17));
     debug_assert!(len <= 17);
     unsafe {
@@ -176,12 +176,12 @@ pub unsafe fn print_u64_mantissa_known_len(x: u64, buf: *mut u8, len: usize) -> 
         let offset = 20 - len;
 
         core::ptr::copy_nonoverlapping(digits_ptr.add(offset), buf, 20);
-        return len;
+        len
     }
 }
 
 #[inline]
-pub unsafe fn print_i32_exp(x: i32, buf: *mut u8) -> usize {
+pub const unsafe fn print_i32_exp(x: i32, buf: *mut u8) -> usize {
     // Invariant: never more than 4 digits
     debug_assert!(-999 <= x && x <= 999);
 
