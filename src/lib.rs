@@ -67,6 +67,13 @@ impl<F: Float, Fmt: Format> Buffer<F, Fmt> {
     }
 }
 
+impl<F: Float, Fmt: Format> Default for Buffer<F, Fmt> {
+    /// This is a cheap operation; you don't need to worry about reusing buffers for efficiency.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<F: Float> Buffer<F, format::General> {
     /// Print a floating point `num` into this buffer, and return a reference to its string
     /// representation.
