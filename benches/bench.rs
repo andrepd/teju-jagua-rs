@@ -67,9 +67,10 @@ criterion_group!(microbench, teju_general, teju_exp, ryu, std);
 
 //
 
-fn read_file(fname: &str) -> Vec<f64> {
+fn read_distribution_file(name: &str) -> Vec<f64> {
     use std::io::{prelude::*, ErrorKind};
     let mut data = vec![];
+    let fname = format!("{}/benches/resources/{}.bin", env!("CARGO_MANIFEST_DIR"), name);
     let mut file = std::fs::File::open(fname).unwrap();
     let mut buf = [0u8; 8];
     loop {
@@ -81,27 +82,25 @@ fn read_file(fname: &str) -> Vec<f64> {
     }
 }
 
-const SIZE: usize = 100_000;
-
 fn benchmark_distribution_finite(c: &mut Criterion, name: &str) {
-    let fname = format!("{}/benches/resources/{}.bin", env!("CARGO_MANIFEST_DIR"), name);
-    let data = read_file(fname.as_str());
+    let data = read_distribution_file(name);
     let mut g = c.benchmark_group(name);
-    g.bench_with_input(BenchmarkId::new("teju", SIZE), &SIZE, |b, _| {
+    g.throughput(criterion::Throughput::Elements(data.len().try_into().unwrap()));
+    g.bench_with_input(BenchmarkId::new("teju", data.len()), &data.len(), |b, _| {
         b.iter(|| {
             for &i in &data {
                 let _ = teju::Buffer::new().format_finite(black_box(i));
             }
         });
     });
-    g.bench_with_input(BenchmarkId::new("ryu", SIZE), &SIZE, |b, _| {
+    g.bench_with_input(BenchmarkId::new("ryu", data.len()), &data.len(), |b, _| {
         b.iter(|| {
             for &i in &data {
                 let _ = ryu::Buffer::new().format_finite(black_box(i));
             }
         });
     });
-    g.bench_with_input(BenchmarkId::new("std", SIZE), &SIZE, |b, _| {
+    g.bench_with_input(BenchmarkId::new("std", data.len()), &data.len(), |b, _| {
         b.iter(|| {
             use std::io::Write;
             let mut buf = [0u8; 80];
@@ -113,24 +112,24 @@ fn benchmark_distribution_finite(c: &mut Criterion, name: &str) {
 }
 
 fn benchmark_distribution(c: &mut Criterion, name: &str) {
-    let fname = format!("{}/benches/resources/{}.bin", env!("CARGO_MANIFEST_DIR"), name);
-    let data = read_file(fname.as_str());
+    let data = read_distribution_file(name);
     let mut g = c.benchmark_group(name);
-    g.bench_with_input(BenchmarkId::new("teju", SIZE), &SIZE, |b, _| {
+    g.throughput(criterion::Throughput::Elements(data.len().try_into().unwrap()));
+    g.bench_with_input(BenchmarkId::new("teju", data.len()), &data.len(), |b, _| {
         b.iter(|| {
             for &i in &data {
                 let _ = teju::Buffer::new().format(black_box(i));
             }
         });
     });
-    g.bench_with_input(BenchmarkId::new("ryu", SIZE), &SIZE, |b, _| {
+    g.bench_with_input(BenchmarkId::new("ryu", data.len()), &data.len(), |b, _| {
         b.iter(|| {
             for &i in &data {
                 let _ = ryu::Buffer::new().format(black_box(i));
             }
         });
     });
-    g.bench_with_input(BenchmarkId::new("std", SIZE), &SIZE, |b, _| {
+    g.bench_with_input(BenchmarkId::new("std", data.len()), &data.len(), |b, _| {
         b.iter(|| {
             use std::io::Write;
             let mut buf = [0u8; 80];
