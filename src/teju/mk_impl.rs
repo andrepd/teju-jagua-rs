@@ -129,17 +129,23 @@ impl Binary {
     /// debug assertions.
     #[inline]
     pub const fn new(num: $f) -> Self {
-        debug_assert!(num.is_finite());
+        if !cfg!(test) {
+            debug_assert!(num.is_finite());
+            debug_assert!(num.abs() != 0.0);
+        }
 
+        // Extract fields
         let num = num.abs();
         let mut mant = lsb(num.to_bits(), Self::BITS_MANTISSA_EXPLICIT);
         let mut exp = (num.to_bits() >> Self::BITS_MANTISSA_EXPLICIT) as Exp;
 
+        // Normals have implicit unit (`1.xxx`) and -1 bias; subnormals don't
         if exp != 0 {
             exp -= 1;
             mant |= 1 << Self::BITS_MANTISSA_EXPLICIT;
         }
 
+        // Add bias
         Binary{
             exp: exp + Self::MIN_EXP,
             mant,
@@ -184,7 +190,7 @@ impl Binary {
     /// the closest if it must.
     #[inline]
     const unsafe fn teju_jagua_inner(self) -> Decimal {
-        debug_assert!(self.mant != 0);
+        debug_assert!(!(self.mant == 0 && self.exp == Self::MIN_EXP));
 
         let exp_floor = self.exp_log10_pow2();
         let exp_residual = self.exp_log10_pow2_residual();
@@ -322,8 +328,10 @@ impl Result {
     /// If `num` is infinite, NaN, or ±0, this is undefined behaviour.
     #[inline]
     pub unsafe fn new(num: $f) -> Self {
-        debug_assert!(num.is_finite());
-        debug_assert!(num.abs() != 0.0);
+        if !cfg!(test) {
+            debug_assert!(num.is_finite());
+            debug_assert!(num.abs() != 0.0);
+        }
         // dbg!(num);
         // dbg!(Binary::new(num));
         // dbg!(Binary::new(num).teju_jagua());
@@ -818,43 +826,44 @@ mod tests {
 
         #[test]
         fn specials() {
-            assert_eq!(crate::Buffer::new().format($f::NAN), "NaN");
-            assert_eq!(crate::Buffer::new().format(-$f::NAN), "NaN");
-            assert_eq!(crate::Buffer::new().format($f::INFINITY), "inf");
-            assert_eq!(crate::Buffer::new().format($f::NEG_INFINITY), "-inf");
-
-            assert_eq!(crate::Buffer::new().format_exp($f::NAN), "NaN");
-            assert_eq!(crate::Buffer::new().format_exp(-$f::NAN), "NaN");
-            assert_eq!(crate::Buffer::new().format_exp($f::INFINITY), "inf");
-            assert_eq!(crate::Buffer::new().format_exp($f::NEG_INFINITY), "-inf");
-
-            assert_eq!(crate::Buffer::new().format_dec($f::NAN), "NaN");
-            assert_eq!(crate::Buffer::new().format_dec(-$f::NAN), "NaN");
-            assert_eq!(crate::Buffer::new().format_dec($f::INFINITY), "inf");
-            assert_eq!(crate::Buffer::new().format_dec($f::NEG_INFINITY), "-inf");
-
-            // No crash
-            if !cfg!(debug_assertions) {
-                crate::Buffer::new().format_finite($f::NAN);
-                crate::Buffer::new().format_finite(-$f::NAN);
-                crate::Buffer::new().format_finite($f::INFINITY);
-                crate::Buffer::new().format_finite($f::NEG_INFINITY);
-
-                crate::Buffer::new().format_exp_finite($f::NAN);
-                crate::Buffer::new().format_exp_finite(-$f::NAN);
-                crate::Buffer::new().format_exp_finite($f::INFINITY);
-                crate::Buffer::new().format_exp_finite($f::NEG_INFINITY);
-
-                crate::Buffer::new().format_dec_finite($f::NAN);
-                crate::Buffer::new().format_dec_finite(-$f::NAN);
-                crate::Buffer::new().format_dec_finite($f::INFINITY);
-                crate::Buffer::new().format_dec_finite($f::NEG_INFINITY);
+            for (value, str) in [
+                ($f::NAN, "NaN"),
+                (-$f::NAN, "NaN"),
+                ($f::INFINITY, "inf"),
+                ($f::NEG_INFINITY, "-inf"),
+            ] {
+                assert_eq!(crate::Buffer::new().format(value), str);
+                assert_eq!(crate::Buffer::new().format_exp(value), str);
+                assert_eq!(crate::Buffer::new().format_dec(value), str);
+                // These should produce unspecified strings
+                core::hint::black_box(crate::Buffer::new().format_finite(value));
+                core::hint::black_box(crate::Buffer::new().format_exp_finite(value));
+                core::hint::black_box(crate::Buffer::new().format_dec_finite(value));
             }
         }
 
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(800_000))]
                         
+            #[test]
+            fn nan_payloads(
+                sign in 0 as Mant ..= 1,
+                payload in 1 as Mant .. Binary::MAX_MANT,
+            ) {
+                let bits_exp = Mant::BITS - Binary::BITS_MANTISSA_EXPLICIT - 1;
+                let exp = ((1 << bits_exp) - 1) << Binary::BITS_MANTISSA_EXPLICIT;
+                let float = $f::from_bits(sign | exp | payload);
+                assert!(float.is_nan(), "Incorrect test case!");
+
+                assert_eq!(crate::Buffer::new().format(float), "NaN");
+                assert_eq!(crate::Buffer::new().format_exp(float), "NaN");
+                assert_eq!(crate::Buffer::new().format_dec(float), "NaN");
+                // These should produce unspecified strings
+                core::hint::black_box(crate::Buffer::new().format_finite(float));
+                core::hint::black_box(crate::Buffer::new().format_exp_finite(float));
+                core::hint::black_box(crate::Buffer::new().format_dec_finite(float));
+            }
+
             #[test]
             fn float_roundtrip_general(
                 float in $f::MIN .. $f::MAX,

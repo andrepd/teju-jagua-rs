@@ -107,7 +107,7 @@ impl<F: Float> Buffer<F, format::General> {
     /// scientific notation otherwise.
     ///
     /// This function **does not** check that `num` is indeed finite, for performance reasons; in
-    /// this case it will print an unspecified (but valid) string.
+    /// this case it will print a string with unspecified contents.
     ///
     /// ```
     /// assert_eq!(teju::Buffer::new().format_finite(3.14159), "3.14159");
@@ -159,7 +159,7 @@ impl<F: Float> Buffer<F, format::Scientific> {
     /// number between 1 (inclusive) and 10 (exclusive), even if `exponent` is `0`.
     /// 
     /// This function **does not** check that `num` is indeed finite, for performance reasons; in
-    /// this case it will print an unspecified (but valid) string.
+    /// this case it will print a string with unspecified contents.
     ///
     /// ```
     /// assert_eq!(teju::Buffer::new().format_finite(137.035999177), "137.035999177");
@@ -210,7 +210,7 @@ impl<F: Float> Buffer<F, format::Decimal> {
     /// The number is always formatted as `[integral part].[fractional part]`.
     /// 
     /// This function **does not** check that `num` is indeed finite, for performance reasons; in
-    /// this case it will print an unspecified (but valid) string.
+    /// this case it will print a string with unspecified contents.
     ///
     /// ```
     /// assert_eq!(teju::Buffer::new().format(1.602176634e-19), "1.602176634e-19");
