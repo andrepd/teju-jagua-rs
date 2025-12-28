@@ -175,7 +175,7 @@ pub const unsafe fn print_u64_mantissa_known_len(x: u64, buf: *mut u8, len: usiz
 
         let offset = 20 - len;
 
-        core::ptr::copy_nonoverlapping(digits_ptr.add(offset), buf, 20);
+        core::ptr::copy_nonoverlapping(digits_ptr.add(offset), buf, len);
         len
     }
 }
