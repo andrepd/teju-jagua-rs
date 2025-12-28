@@ -138,7 +138,7 @@ pub const unsafe fn print_u64_mantissa_known_len(x: u64, buf: *mut u8, len: usiz
         }
 
         // TODO build directly in buf? But then we'd have to branch
-        let mut digits = [MaybeUninit::<u8>::uninit(); 20];
+        let mut digits = [MaybeUninit::<u8>::uninit(); 40];
         let digits_ptr = digits.as_mut_ptr() as *mut u8;
         let top12 = x / 100000000u64;
         let top4 = x / 10000000000000000u64;
